@@ -6,15 +6,13 @@
 :license: Apache License 2.0
 :version: 0.1
 
-..
+:license:
 
    Copyright 2015 Buber
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-      http://www.apache.org/licenses/LICENSE-2.0
+   You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 
    Unless required by applicable law or agreed to in writing, software
    distributed under the License is distributed on an "AS IS" BASIS,
@@ -27,7 +25,7 @@ import sys, inspect, decimal, random, json, datetime, time
 from flask import Flask, request, Response
 
 class magicDict(dict):
-   #Реализация объектов-словарей, как в Javascript
+   #get and set values like in Javascript (dict.<key>)
    __getattr__=dict.__getitem__
    __setattr__=dict.__setitem__
    __delattr__=dict.__delitem__
@@ -50,7 +48,7 @@ class flaskJSONRPCServer:
    def isDict(self, o): return isinstance(o, (dict))
 
    def registerInstance(self, dispatcher, path=''):
-      #прописываем доступные методы
+      #add links to methods
       for name in dir(dispatcher):
          link=getattr(dispatcher, name)
          if self.isFunction(link):
@@ -58,20 +56,20 @@ class flaskJSONRPCServer:
             if hasattr(link, '_alias'):
                tArr1=link._alias if self.isArray(link._alias) else [link._alias]
                for alias in tArr1: self.dispatchers[alias]=link
-      #регестрируем диспетчер
-      if self.setts.fallback_JSONP: #дополнительный путь для поддержки JSONP
+      #register dispatcher
+      if self.setts.fallback_JSONP: #additional path for support JSONP
          path_jsonp=path+('/' if path[-1]!='/' else '')+'<method>'
          self.flaskApp.add_url_rule(rule=path_jsonp, view_func=self._requestHandler, methods=['GET', 'OPTIONS', 'POST'])
       self.flaskApp.add_url_rule(rule=path, view_func=self._requestHandler, methods=['GET', 'OPTIONS', 'POST'])
 
    def registerFunction(self, dispatcher, path=''):
-      #прописываем доступные методы
+      #add links to methods
       self.dispatchers[dispatcher.__name__]=dispatcher
       if hasattr(dispatcher, '_alias'):
          tArr1=dispatcher._alias if self.isArray(dispatcher._alias) else [dispatcher._alias]
          for alias in tArr1: self.dispatchers[alias]=dispatcher
-      #регестрируем диспетчер
-      if self.setts.fallback_JSONP: #дополнительный путь для поддержки JSONP
+      #register dispatcher
+      if self.setts.fallback_JSONP: #additional path for support JSONP
          path_jsonp=path+('/' if path[-1]!='/' else '')+'<method>'
          self.flaskApp.add_url_rule(rule=path_jsonp, view_func=self._requestHandler, methods=['GET', 'OPTIONS', 'POST'])
       self.flaskApp.add_url_rule(rule=path, view_func=self._requestHandler, methods=['GET', 'OPTIONS', 'POST'])
@@ -80,7 +78,7 @@ class flaskJSONRPCServer:
       try:
          tArr1=json.loads(data)
          tArr2=[]
-         tArr1=tArr1 if self.isArray(tArr1) else [tArr1] #поддержка batch
+         tArr1=tArr1 if self.isArray(tArr1) else [tArr1] #support for batch requests
          for r in tArr1:
             tArr2.append({'jsonrpc':r.get('jsonrpc', None), 'method':r.get('method', None), 'params':r.get('params', None), 'id':r.get('id', None)})
          return [True, tArr2]
@@ -101,7 +99,7 @@ class flaskJSONRPCServer:
       def _fixJSON(o):
          if isinstance(o, decimal.Decimal): return str(o) #fix Decimal conversion
          elif isinstance(o, (datetime.datetime, datetime.date, datetime.time)): return o.isoformat() #fix DateTime conversion
-         elif isFunction(self.fixJSON): return self.fixJSON(o)
+         elif self.isFunction(self.fixJSON): return self.fixJSON(o) #callback for user's types
       s=json.dumps(data, indent=None, separators=(',',':'), ensure_ascii=True, sort_keys=True, default=_fixJSON)
       return s
 
@@ -134,10 +132,10 @@ class flaskJSONRPCServer:
          _args=[s for s in _args if s!='self']
          if self.isDict(data['params']): params=data['params']
          elif self.isArray(data['params']):
-            #параметры переданы как массив, преобразовываем в именнованные
+            #convert array of arguments to **kwargs
             for i in xrange(len(data['params'])):
                params[_args[i]]=data['params'][i]
-         if '_connection' in _args: #если нужно, прописываем в параметры дополнительную информацию
+         if '_connection' in _args: #add connection info if needed
             params['_connection']=magicDict({'headers':dict([h for h in request.headers]), 'cookies':request.cookies, 'ip':request.environ.get('HTTP_X_REAL_IP', request.remote_addr), 'cookiesOut':[], 'headersOut':{}, 'jsonp':isJSONP})
          result=self.dispatchers[data['method']](**params)
          return True, params, result
@@ -163,65 +161,65 @@ class flaskJSONRPCServer:
          data=request.data or (request.form.keys()[0] if len(request.form.keys())==1 else None)
          self.logger('REQUEST:', data)
          status, dataInList=self.parseRequest(data)
-         if not status: #ошибка парсинга запроса
+         if not status: #error of parsing
             error={"code": -32700, "message": "Parse error"}
          else:
             for dataIn in dataInList:
-               if not(dataIn['jsonrpc']) or not(dataIn['method']) or (dataIn['params'] and not(self.isDict(dataIn['params'])) and not(self.isArray(dataIn['params']))): #ошибка в синтаксисе запроса
+               if not(dataIn['jsonrpc']) or not(dataIn['method']) or (dataIn['params'] and not(self.isDict(dataIn['params'])) and not(self.isArray(dataIn['params']))): #syntax error in request
                   error.append({"code": -32600, "message": "Invalid Request"})
-               elif dataIn['method'] not in self.dispatchers: #неизвестный метод
+               elif dataIn['method'] not in self.dispatchers: #call of uncknown method
                   error.append({"code": -32601, "message": "Method not found", "id":dataIn['id']})
-               else: #корректный запрос, выполняем
-                  if not dataIn['id']: #тип запроса нотиф
-                     #! клиент не должен ожидать окончания выполнения нотифов
+               else: #process correct request
+                  if not dataIn['id']: #notification request
+                     #! add non-blocking processing
                      status, params, result=self.callDispatcher(dataIn, request)
-                  else: #обычный запрос
+                  else: #simple request
                      status, params, result=self.callDispatcher(dataIn, request)
                      if status:
-                        if '_connection' in params: #дополнительные куки и хедеры
+                        if '_connection' in params: #get additional headers and cookies
                            outHeaders.update(params['_connection'].headersOut)
                            outCookies+=params['_connection'].cookiesOut
                         out.append({"id":dataIn['id'], "data":result})
                      else:
                         error.append({"code": 500, "message": result, "id":dataIn['id']})
-         #подоготавливаем ответ
+         #prepare output for response
          self.logger('ERRORS:', error)
          self.logger('OUT:', out)
-         if self.isDict(error): #ошабка парсинга
+         if self.isDict(error): #error of parsing
             dataOut=self.prepResponse(error, isError=True)
-         elif len(error) and len(dataInList)>1: #ошибки для batch запроса
+         elif len(error) and len(dataInList)>1: #error for batch request
             for d in error: dataOut.append(self.prepResponse(d, isError=True))
-         elif len(error): #ошибка обычного запроса
+         elif len(error): #error for simple request
             dataOut=self.prepResponse(error[0], isError=True)
-         if len(out) and len(dataInList)>1: #ответ для batch запроса
+         if len(out) and len(dataInList)>1: #response for batch request
             for d in out: dataOut.append(self.prepResponse(d, isError=False))
-         elif len(out): #ответ для обычного запроса
+         elif len(out): #response for simple request
             dataOut=self.prepResponse(out[0], isError=False)
-         #сереализуем ответ
+         #serialize response
          dataOut=self.serializeResponse(dataOut)
       elif request.method=='GET': #JSONP fallback
          self.logger('REQUEST:', method, request.args)
          jsonpCB=request.args.get('jsonp', False)
          jsonpCB='%s(%%s);'%(jsonpCB) if jsonpCB else '%s;'
-         if not method or method not in self.dispatchers: #неизвестный метод
+         if not method or method not in self.dispatchers: #call of uncknown method
             out.append({'jsonpCB':jsonpCB, 'data':{"error":{"code": -32601, "message": "Method not found"}}})
-         else: #корректный запрос, выполняем
+         else: #process correct request
             params=dict([(k, v) for k, v in request.args.items()])
             if 'jsonp' in params: del params['jsonp']
             dataIn={'method':method, 'params':params}
             status, params, result=self.callDispatcher(dataIn, request, isJSONP=jsonpCB)
             if status:
-               if '_connection' in params: #дополнительные куки и хедеры
+               if '_connection' in params: #get additional headers and cookies
                   outHeaders.update(params['_connection'].headersOut)
                   outCookies+=params['_connection'].cookiesOut
                   jsonpCB=params['_connection'].jsonp
                out.append({'jsonpCB':jsonpCB, 'data':result})
             else:
                out.append({'jsonpCB':jsonpCB, 'data':result})
-         #подоготавливаем ответ
+         #prepare output for response
          self.logger('ERRORS:', error)
          self.logger('OUT:', out)
-         if len(out): #ответ для обычного запроса
+         if len(out): #response for simple request
             dataOut=self.serializeResponse(out[0]['data'])
             dataOut=out[0]['jsonpCB']%(dataOut)
       self.logger('RESPONSE:', dataOut)
@@ -239,7 +237,7 @@ class flaskJSONRPCServer:
          if not self.setts.blocking:
             from gevent import monkey
             monkey.patch_all()
-         #! For auto-reloading with gevent see http://goo.gl/LCbAcA
+         #! For auto-restart on change with gevent see http://goo.gl/LCbAcA
          # if self.setts.debug:
          #    from werkzeug.serving import run_with_reloader
          #    self.flaskApp=run_with_reloader(self.flaskApp)
@@ -271,15 +269,15 @@ class flaskJSONRPCServer:
 
 --> [1,2,3]
 <-- [
-  {"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"}, "id": null},
-  {"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"}, "id": null},
-  {"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"}, "id": null}
-]
+      {"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"}, "id": null},
+      {"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"}, "id": null},
+      {"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"}, "id": null}
+    ]
 
 --> [
-  {"jsonrpc": "2.0", "method": "sum", "params": [1,2,4], "id": "1"},
-  {"jsonrpc": "2.0", "method"
-]
+      {"jsonrpc": "2.0", "method": "sum", "params": [1,2,4], "id": "1"},
+      {"jsonrpc": "2.0", "method"
+    ]
 <-- {"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}, "id": null}
 
 --> [
