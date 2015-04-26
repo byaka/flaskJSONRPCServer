@@ -21,7 +21,8 @@
    limitations under the License.
 """
 
-import sys, inspect, decimal, random, json, datetime, time
+import sys, inspect, decimal, random, json, datetime, time, gzip
+from cStringIO import StringIO
 from flask import Flask, request, Response
 
 class magicDict(dict):
@@ -31,10 +32,10 @@ class magicDict(dict):
    __delattr__=dict.__delitem__
 
 class flaskJSONRPCServer:
-   def __init__(self, ipAndPort, requestHandler=None, blocking=True, cors=False, gevent=False, debug=False, log=True, fallback=True):
+   def __init__(self, ipAndPort, requestHandler=None, blocking=True, cors=False, gevent=False, debug=False, log=True, fallback=True, allowCompress=False):
       self.flaskAppName='_%s_'%(int(random.random()*65536))
-      self.version=0.1
-      self.setts=magicDict({'ip':ipAndPort[0], 'port':ipAndPort[1], 'blocking':blocking, 'fallback_JSONP':fallback, 'CORS':cors, 'gevent':gevent, 'debug':debug, 'log':log})
+      self.version=0.2
+      self.setts=magicDict({'ip':ipAndPort[0], 'port':ipAndPort[1], 'blocking':blocking, 'fallback_JSONP':fallback, 'CORS':cors, 'gevent':gevent, 'debug':debug, 'log':log, 'allowCompress':allowCompress, 'compressMinSize':1024})
       self.dispatchers={}
       self.flaskApp=Flask(self.flaskAppName)
       self.fixJSON=None
@@ -136,7 +137,7 @@ class flaskJSONRPCServer:
             for i in xrange(len(data['params'])):
                params[_args[i]]=data['params'][i]
          if '_connection' in _args: #add connection info if needed
-            params['_connection']=magicDict({'headers':dict([h for h in request.headers]), 'cookies':request.cookies, 'ip':request.environ.get('HTTP_X_REAL_IP', request.remote_addr), 'cookiesOut':[], 'headersOut':{}, 'jsonp':isJSONP})
+            params['_connection']=magicDict({'headers':dict([h for h in request.headers]), 'cookies':request.cookies, 'ip':request.environ.get('HTTP_X_REAL_IP', request.remote_addr), 'cookiesOut':[], 'headersOut':{}, 'jsonp':isJSONP, 'allowCompress':self.setts.allowCompress})
          result=self.dispatchers[data['method']](**params)
          return True, params, result
       except Exception:
@@ -149,6 +150,7 @@ class flaskJSONRPCServer:
       outCookies=[]
       dataOut=[]
       mytime=round(time.time()*1000.0, 0)
+      allowCompress=self.setts.allowCompress
       if self.setts.CORS:
          outHeaders.update({'Access-Control-Allow-Headers':'Origin, Authorization, X-Requested-With, Content-Type, Accept', 'Access-Control-Max-Age':'0', 'Access-Control-Allow-Methods':'GET, PUT, POST, DELETE, OPTIONS'})
          if self.isDict(self.setts.CORS):
@@ -179,6 +181,8 @@ class flaskJSONRPCServer:
                         if '_connection' in params: #get additional headers and cookies
                            outHeaders.update(params['_connection'].headersOut)
                            outCookies+=params['_connection'].cookiesOut
+                           if self.setts.allowCompress and params['_connection'].allowCompress is False: allowCompress=False
+                           elif self.setts.allowCompress is False and params['_connection'].allowCompress: allowCompress=True
                         out.append({"id":dataIn['id'], "data":result})
                      else:
                         error.append({"code": 500, "message": result, "id":dataIn['id']})
@@ -213,6 +217,8 @@ class flaskJSONRPCServer:
                   outHeaders.update(params['_connection'].headersOut)
                   outCookies+=params['_connection'].cookiesOut
                   jsonpCB=params['_connection'].jsonp
+                  if self.setts.allowCompress and params['_connection'].allowCompress is False: allowCompress=False
+                  elif self.setts.allowCompress is False and params['_connection'].allowCompress: allowCompress=True
                out.append({'jsonpCB':jsonpCB, 'data':result})
             else:
                out.append({'jsonpCB':jsonpCB, 'data':result})
@@ -229,6 +235,21 @@ class flaskJSONRPCServer:
          try: resp.set_cookie(c.get('name', ''), c.get('value', ''), expires=c.get('expires', 2147483647), domain=c.get('domain', '*'))
          except: resp.set_cookie(c.get('name', ''), c.get('value', ''), expires=c.get('expires', 2147483647))
       self.logger('GENERATE TIME:', round(time.time()*1000.0, 0)-mytime)
+      #compression
+      if resp.status_code!=200 or len(resp.data)<self.setts.compressMinSize or not allowCompress or 'gzip' not in request.headers.get('Accept-Encoding', '').lower():
+         #without compression
+         return resp
+      mytime=round(time.time()*1000.0, 0)
+      resp.direct_passthrough=False
+      gzip_buffer=StringIO()
+      gzip_file=gzip.GzipFile(mode='wb', fileobj=gzip_buffer)
+      gzip_file.write(resp.data)
+      gzip_file.close()
+      resp.data=gzip_buffer.getvalue()
+      resp.headers['Content-Encoding']='gzip'
+      resp.headers['Vary']='Accept-Encoding'
+      resp.headers['Content-Length']=len(resp.data)
+      self.logger('COMPRESSION TIME:', round(time.time()*1000.0, 0)-mytime)
       return resp
 
    def serveForever(self):
