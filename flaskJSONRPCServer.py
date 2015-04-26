@@ -4,7 +4,7 @@
 :authors: Jhon Byaka
 :copyright: Copyright 2015, Buber
 :license: Apache License 2.0
-:version: 0.1
+:version: 0.3
 
 :license:
 
@@ -34,11 +34,13 @@ class magicDict(dict):
 class flaskJSONRPCServer:
    def __init__(self, ipAndPort, requestHandler=None, blocking=True, cors=False, gevent=False, debug=False, log=True, fallback=True, allowCompress=False):
       self.flaskAppName='_%s_'%(int(random.random()*65536))
-      self.version=0.2
+      self.version=0.3
       self.setts=magicDict({'ip':ipAndPort[0], 'port':ipAndPort[1], 'blocking':blocking, 'fallback_JSONP':fallback, 'CORS':cors, 'gevent':gevent, 'debug':debug, 'log':log, 'allowCompress':allowCompress, 'compressMinSize':1024})
       self.dispatchers={}
       self.flaskApp=Flask(self.flaskAppName)
       self.fixJSON=None
+      self.speedStats={}
+      self.connPerMinute=magicDict({'nowMinute':0, 'count':0, 'oldCount':0})
       if self.isFunction(requestHandler): self._requestHandler=requestHandler
       else: self._requestHandler=self.requestHandler
 
@@ -47,6 +49,12 @@ class flaskJSONRPCServer:
    def isArray(self, o): return isinstance(o, (list))
 
    def isDict(self, o): return isinstance(o, (dict))
+
+   def speedStatsAdd(self, name, val):
+      if name not in self.speedStats: self.speedStats[name]=[]
+      self.speedStats[name].append(val)
+      if len(self.speedStats[name])>9999:
+         self.speedStats[name]=self.speedStats[name][len(self.speedStats[name])-9999:]
 
    def registerInstance(self, dispatcher, path=''):
       #add links to methods
@@ -77,11 +85,13 @@ class flaskJSONRPCServer:
 
    def parseRequest(self, data):
       try:
+         mytime=time.time()*1000.0
          tArr1=json.loads(data)
          tArr2=[]
          tArr1=tArr1 if self.isArray(tArr1) else [tArr1] #support for batch requests
          for r in tArr1:
             tArr2.append({'jsonrpc':r.get('jsonrpc', None), 'method':r.get('method', None), 'params':r.get('params', None), 'id':r.get('id', None)})
+         self.speedStatsAdd('parseRequest', time.time()*1000.0-mytime)
          return [True, tArr2]
       except Exception, e:
          self.logger(e)
@@ -101,7 +111,9 @@ class flaskJSONRPCServer:
          if isinstance(o, decimal.Decimal): return str(o) #fix Decimal conversion
          elif isinstance(o, (datetime.datetime, datetime.date, datetime.time)): return o.isoformat() #fix DateTime conversion
          elif self.isFunction(self.fixJSON): return self.fixJSON(o) #callback for user's types
+      mytime=time.time()*1000.0
       s=json.dumps(data, indent=None, separators=(',',':'), ensure_ascii=True, sort_keys=True, default=_fixJSON)
+      self.speedStatsAdd('serializeResponse', time.time()*1000.0-mytime)
       return s
 
    def getErrorInfo(self):
@@ -137,13 +149,23 @@ class flaskJSONRPCServer:
             for i in xrange(len(data['params'])):
                params[_args[i]]=data['params'][i]
          if '_connection' in _args: #add connection info if needed
-            params['_connection']=magicDict({'headers':dict([h for h in request.headers]), 'cookies':request.cookies, 'ip':request.environ.get('HTTP_X_REAL_IP', request.remote_addr), 'cookiesOut':[], 'headersOut':{}, 'jsonp':isJSONP, 'allowCompress':self.setts.allowCompress})
+            params['_connection']=magicDict({'headers':dict([h for h in request.headers]), 'cookies':request.cookies, 'ip':request.environ.get('HTTP_X_REAL_IP', request.remote_addr), 'cookiesOut':[], 'headersOut':{}, 'jsonp':isJSONP, 'allowCompress':self.setts.allowCompress, 'server':self})
+         mytime=time.time()*1000.0
          result=self.dispatchers[data['method']](**params)
+         self.speedStatsAdd('callDispatcher', time.time()*1000.0-mytime)
          return True, params, result
       except Exception:
          return False, params, self.getErrorInfo()
 
    def requestHandler(self, method=None):
+      #calculate connections per second
+      nowMinute=int(time.time())/60
+      if nowMinute!=self.connPerMinute.nowMinute:
+         self.connPerMinute.nowMinute=nowMinute
+         if self.connPerMinute.count: self.connPerMinute.oldCount=self.connPerMinute.count
+         self.connPerMinute.count=0
+      self.connPerMinute.count+=1
+      #start processing request
       error=[]
       out=[]
       outHeaders={}
@@ -249,6 +271,7 @@ class flaskJSONRPCServer:
       resp.headers['Content-Encoding']='gzip'
       resp.headers['Vary']='Accept-Encoding'
       resp.headers['Content-Length']=len(resp.data)
+      self.speedStatsAdd('compressResponse', time.time()*1000.0-mytime)
       self.logger('COMPRESSION TIME:', round(time.time()*1000.0, 0)-mytime)
       return resp
 
@@ -267,7 +290,7 @@ class flaskJSONRPCServer:
          WSGIServer((self.setts.ip, self.setts.port), self.flaskApp, log=('default' if self.setts.debug else False)).serve_forever()
       else:
          self.logger('SERVER RUNNING..')
-         self.flaskApp.run(host=self.setts.ip, port=self.setts.port, debug=self.setts.debug, threaded=self.setts.blocking)
+         self.flaskApp.run(host=self.setts.ip, port=self.setts.port, debug=self.setts.debug, threaded=not(self.setts.blocking))
 
 """REQUEST-RESPONSE SAMPLES
 --> {"jsonrpc": "2.0", "method": "subtract", "params": [42, 23], "id": 1}

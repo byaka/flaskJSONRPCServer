@@ -30,6 +30,16 @@ def block():
    time.sleep(10)
    return 'ok'
 
+def stats(_connection=None):
+   #calculate connections per second
+   tArr1={'connPerSec_now':_connection.server.connPerMinute.count/60.0, 'connPerSec_old':_connection.server.connPerMinute.oldCount/60.0, 'speedStats':{}}
+   #calculate spped stats
+   for k, v in _connection.server.speedStats.items():
+      tArr1['speedStats'][k+'_min']=min(v)
+      tArr1['speedStats'][k+'_max']=max(v)
+      tArr1['speedStats'][k+'_average']=sum(v)/float(len(v))
+   return tArr1
+
 def big(_connection=None):
    _connection.allowCompress=True #allow compression for this method
    s="""
@@ -110,6 +120,7 @@ if __name__=='__main__':
    server.registerFunction(block, path='/api')
    server.registerFunction(myip, path='/api')
    server.registerFunction(big, path='/api')
+   server.registerFunction(stats, path='/api')
    # Run server
    server.serveForever()
    # Now you can access this api by path http://127.0.0.1:7001/api for JSON-RPC requests
