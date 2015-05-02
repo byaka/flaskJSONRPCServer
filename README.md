@@ -1,3 +1,4 @@
+[![PyPI version](https://badge.fury.io/py/flaskJSONRPCServer.png)](http://badge.fury.io/py/flaskJSONRPCServer)
 # flaskJSONRPCServer
 This library is an implementation of the JSON-RPC specification. It supports only 2.0 specification for now, which includes batch submission, keyword arguments, etc.
 
