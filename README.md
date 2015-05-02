@@ -21,6 +21,9 @@ This library is an implementation of the JSON-RPC specification. It supports onl
  - Lib not handle **Notification** requests fully (for now client waiting, while server processes requests)
  - Lib not has **decorators**, so it not a "Flask-way" (this can be simply added, but i not use decorators, sorry)
 
+## Install
+```pip install flaskJSONRPCServer```
+
 ## Examples
 Simple server
 ```python

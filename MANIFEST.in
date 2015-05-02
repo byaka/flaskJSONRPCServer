@@ -1,0 +1,3 @@
+include README.md simpleServer.py
+exclude *.pyc
+

@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+__version__='0.3.1'
 """
 :authors: Jhon Byaka
 :copyright: Copyright 2015, Buber
 :license: Apache License 2.0
-:version: 0.3
 
 :license:
 
@@ -34,13 +34,13 @@ class magicDict(dict):
 class flaskJSONRPCServer:
    def __init__(self, ipAndPort, requestHandler=None, blocking=True, cors=False, gevent=False, debug=False, log=True, fallback=True, allowCompress=False):
       self.flaskAppName='_%s_'%(int(random.random()*65536))
-      self.version=0.3
+      self.version=__version__
       self.setts=magicDict({'ip':ipAndPort[0], 'port':ipAndPort[1], 'blocking':blocking, 'fallback_JSONP':fallback, 'CORS':cors, 'gevent':gevent, 'debug':debug, 'log':log, 'allowCompress':allowCompress, 'compressMinSize':1024})
       self.dispatchers={}
       self.flaskApp=Flask(self.flaskAppName)
       self.fixJSON=None
       self.speedStats={}
-      self.connPerMinute=magicDict({'nowMinute':0, 'count':0, 'oldCount':0})
+      self.connPerMinute=magicDict({'nowMinute':0, 'count':0, 'oldCount':0, 'maxCount':0, 'minCount':0})
       if self.isFunction(requestHandler): self._requestHandler=requestHandler
       else: self._requestHandler=self.requestHandler
 
@@ -162,7 +162,12 @@ class flaskJSONRPCServer:
       nowMinute=int(time.time())/60
       if nowMinute!=self.connPerMinute.nowMinute:
          self.connPerMinute.nowMinute=nowMinute
-         if self.connPerMinute.count: self.connPerMinute.oldCount=self.connPerMinute.count
+         if self.connPerMinute.count:
+            self.connPerMinute.oldCount=self.connPerMinute.count
+         if self.connPerMinute.count>self.connPerMinute.maxCount:
+            self.connPerMinute.maxCount=self.connPerMinute.count
+         if self.connPerMinute.count<self.connPerMinute.minCount or not self.connPerMinute.minCount:
+            self.connPerMinute.minCount=self.connPerMinute.count
          self.connPerMinute.count=0
       self.connPerMinute.count+=1
       #start processing request
