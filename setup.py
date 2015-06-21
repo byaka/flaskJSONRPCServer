@@ -16,7 +16,7 @@ setup(
    long_description  =open('README.rst').read(),
    author            ='Jhon Byaka',
    author_email      ='byaka.life@gmail.com',
-   url               ='https://github.com/byaka/flaskJSONRPCServer',
+   url               ='https://byaka.github.io/flaskJSONRPCServer/',
    download_url      ='https://github.com/byaka/flaskJSONRPCServer/tarball/master',
    license           ='Apache 2.0',
    keywords          ='flask json-rpc jsonrpc gevent',
