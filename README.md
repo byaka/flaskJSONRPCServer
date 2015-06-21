@@ -1,6 +1,12 @@
-[![PyPI version](https://badge.fury.io/py/flaskJSONRPCServer.png)](http://badge.fury.io/py/flaskJSONRPCServer)
+[![PyPI version](https://img.shields.io/pypi/v/flaskJSONRPCServer.svg)](https://pypi.python.org/pypi/flaskJSONRPCServer)
+[![PyPI downloads](https://img.shields.io/pypi/dm/flaskJSONRPCServer.svg)](https://pypi.python.org/pypi/flaskJSONRPCServer)
+[![License](https://img.shields.io/pypi/l/flaskJSONRPCServer.svg)](http://www.apache.org/licenses/LICENSE-2.0.html)
+
 # flaskJSONRPCServer
 This library is an implementation of the JSON-RPC specification. It supports only 2.0 specification for now, which includes batch submission, keyword arguments, etc.
+
+## Comments, bug reports
+flaskJSONRPCServer resides on **github**. You can file issues or pull requests [there](https://github.com/byaka/flaskJSONRPCServer/issues).
 
 ## Requirements
  - Python >=2.6
@@ -148,6 +154,7 @@ if __name__=='__main__':
    server.registerFunction(echo, path='/api')
    server.registerFunction(block, path='/api')
    server.registerFunction(myip, path='/api')
+   big._alias='bigdata' #setting alias for method
    server.registerFunction(big, path='/api')
    server.registerFunction(stats, path='/api')
    # Run server
@@ -159,4 +166,4 @@ if __name__=='__main__':
 ```
 
 ## License
-It is licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0.html).
+It is licensed under the Apache License, Version 2.0 ([read](http://www.apache.org/licenses/LICENSE-2.0.html)).
