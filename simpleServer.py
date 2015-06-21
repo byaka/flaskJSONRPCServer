@@ -32,12 +32,12 @@ def block():
 
 def stats(_connection=None):
    #calculate connections per second
-   tArr1={'connPerSec_now':_connection.server.connPerMinute.count/60.0, 'connPerSec_old':_connection.server.connPerMinute.oldCount/60.0, 'speedStats':{}}
+   tArr1={'connPerSec_now':round(_connection.server.connPerMinute.count/60.0, 2), 'connPerSec_old':round(_connection.server.connPerMinute.oldCount/60.0, 2), 'connPerSec_max':round(_connection.server.connPerMinute.maxCount/60.0, 2), 'speedStats':{}}
    #calculate spped stats
    for k, v in _connection.server.speedStats.items():
-      tArr1['speedStats'][k+'_min']=min(v)
-      tArr1['speedStats'][k+'_max']=max(v)
-      tArr1['speedStats'][k+'_average']=sum(v)/float(len(v))
+      tArr1['speedStats'][k+'_min']=round(min(v), 2)
+      tArr1['speedStats'][k+'_max']=round(max(v), 2)
+      tArr1['speedStats'][k+'_average']=round(sum(v)/float(len(v)), 2)
    return tArr1
 
 def big(_connection=None):
@@ -111,7 +111,7 @@ if __name__=='__main__':
    #    <log>           switch to logging debug info from flaskJSONRPCServer
    #    <fallback>      switch auto fallback to JSONP on GET requests
    #    <allowCompress> switch auto compression
-   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=False, debug=False, log=True, fallback=True, allowCompress=False)
+   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=True, fallback=True, allowCompress=False)
    # Register dispatcher for all methods of instance
    server.registerInstance(mySharedMethods(), path='/api')
    # Register dispatchers for single functions
@@ -119,6 +119,7 @@ if __name__=='__main__':
    server.registerFunction(echo, path='/api')
    server.registerFunction(block, path='/api')
    server.registerFunction(myip, path='/api')
+   big._alias='bigdata' #setting alias for method
    server.registerFunction(big, path='/api')
    server.registerFunction(stats, path='/api')
    # Run server
