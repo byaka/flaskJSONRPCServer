@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-__version__='0.3.1'
+__version__='0.4.1'
 """
 :authors: Jhon Byaka
 :copyright: Copyright 2015, Buber
@@ -21,9 +21,11 @@ __version__='0.3.1'
    limitations under the License.
 """
 
-import sys, inspect, decimal, random, json, datetime, time, gzip
+import sys, inspect, decimal, random, json, datetime, time, gzip, resource, os, zipfile, atexit, subprocess
 from cStringIO import StringIO
-from flask import Flask, request, Response
+Flask=None
+request=None
+Response=None
 
 class magicDict(dict):
    #get and set values like in Javascript (dict.<key>)
@@ -32,10 +34,26 @@ class magicDict(dict):
    __delattr__=dict.__delitem__
 
 class flaskJSONRPCServer:
-   def __init__(self, ipAndPort, requestHandler=None, blocking=True, cors=False, gevent=False, debug=False, log=True, fallback=True, allowCompress=False):
+   def __init__(self, ipAndPort, requestHandler=None, blocking=True, cors=False, gevent=False, debug=False, log=True, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536)):
+      # Flask imported here for avoiding error in setup.py if Flask not installed yet
+      global Flask, request, Response
+      from flask import Flask, request, Response
+      self.tweakLimit(tweakDescriptors)
       self.flaskAppName='_%s_'%(int(random.random()*65536))
       self.version=__version__
-      self.setts=magicDict({'ip':ipAndPort[0], 'port':ipAndPort[1], 'blocking':blocking, 'fallback_JSONP':fallback, 'CORS':cors, 'gevent':gevent, 'debug':debug, 'log':log, 'allowCompress':allowCompress, 'compressMinSize':1024})
+      self.setts=magicDict({
+         'ip':ipAndPort[0],
+         'port':ipAndPort[1],
+         'blocking':blocking,
+         'fallback_JSONP':fallback,
+         'CORS':cors,
+         'gevent':gevent,
+         'debug':debug,
+         'log':log,
+         'allowCompress':allowCompress,
+         'compressMinSize':1024,
+         'ssl':ssl
+      })
       self.dispatchers={}
       self.flaskApp=Flask(self.flaskAppName)
       self.fixJSON=None
@@ -44,17 +62,65 @@ class flaskJSONRPCServer:
       if self.isFunction(requestHandler): self._requestHandler=requestHandler
       else: self._requestHandler=self.requestHandler
 
+   def tweakLimit(self, descriptors=(65536, 65536)):
+      if descriptors: #tweak ulimit for more file descriptors
+         try: #for Linux
+            if resource.getrlimit(resource.RLIMIT_NOFILE)!=descriptors:
+               resource.setrlimit(resource.RLIMIT_NOFILE, descriptors)
+         except: pass
+         try: #for BSD
+            if resource.getrlimit(resource.RLIMIT_OFILE)!=descriptors:
+               resource.setrlimit(resource.RLIMIT_OFILE, descriptors)
+         except: pass
+
    def isFunction(self, o): return hasattr(o, '__call__')
 
    def isArray(self, o): return isinstance(o, (list))
 
    def isDict(self, o): return isinstance(o, (dict))
 
+   def isString(self, o): return isinstance(o, (str, unicode))
+
+   def fileGet(self, fName, method='r'):
+      #get content from file,using $method and if file is ZIP, read file $method in this archive
+      fName=fName.encode('cp1251')
+      if not os.path.isfile(fName): return None
+      if zipfile.is_zipfile(fName):
+         c=zipfile.ZipFile(fName, method)
+         try: s=c.read(method)
+         except Exception, e:
+            self.logger('Error fileGet', fName, ',', method, e)
+            s=None
+         c.close()
+      else:
+         try:
+            with open(fName, method) as f: s=f.read()
+         except: s=None
+      return s
+
+   def fileWrite(self, fName, text, mode='w'):
+      if not self.isString(text): text=repr(text)
+      with open(fName, mode) as f: f.write(text)
+
+   def strGet(self, text, pref='', suf='', index=0, default=None):
+      #return pattern by format pref+pattenr+suf
+      if(text==''): return ''
+      text1=text.lower()
+      pref=pref.lower()
+      suf=suf.lower()
+      if pref!='': i1=text1.find(pref,index)
+      else: i1=index
+      if i1==-1: return default
+      if suf!='': i2=text1.find(suf,i1+len(pref))
+      else: i2=len(text1)
+      if i2==-1: return default
+      return text[i1+len(pref):i2]
+
    def speedStatsAdd(self, name, val):
       if name not in self.speedStats: self.speedStats[name]=[]
       self.speedStats[name].append(val)
-      if len(self.speedStats[name])>9999:
-         self.speedStats[name]=self.speedStats[name][len(self.speedStats[name])-9999:]
+      if len(self.speedStats[name])>99999:
+         self.speedStats[name]=self.speedStats[name][len(self.speedStats[name])-99999:]
 
    def registerInstance(self, dispatcher, path=''):
       #add links to methods
@@ -94,7 +160,7 @@ class flaskJSONRPCServer:
          self.speedStatsAdd('parseRequest', time.time()*1000.0-mytime)
          return [True, tArr2]
       except Exception, e:
-         self.logger(e)
+         self.logger('Error parseRequest', e)
          return [False, e]
 
    def prepResponse(self, data, isError=False):
@@ -145,7 +211,7 @@ class flaskJSONRPCServer:
          _args=[s for s in _args if s!='self']
          if self.isDict(data['params']): params=data['params']
          elif self.isArray(data['params']):
-            #convert array of arguments to **kwargs
+            #convert *args to **kwargs
             for i in xrange(len(data['params'])):
                params[_args[i]]=data['params'][i]
          if '_connection' in _args: #add connection info if needed
@@ -291,11 +357,82 @@ class flaskJSONRPCServer:
          #    from werkzeug.serving import run_with_reloader
          #    self.flaskApp=run_with_reloader(self.flaskApp)
          #    self.flaskApp.debug=True
-         from gevent.wsgi import WSGIServer
-         WSGIServer((self.setts.ip, self.setts.port), self.flaskApp, log=('default' if self.setts.debug else False)).serve_forever()
+         from gevent.pywsgi import WSGIServer
+         if self.setts.ssl:
+            from gevent import ssl
+            # from functools import wraps
+            # def sslwrap(func):
+            #    @wraps(func)
+            #    def bar(*args, **kw):
+            #       kw['ssl_version']=ssl.PROTOCOL_TLSv1
+            #       return func(*args, **kw)
+            #    return bar
+            # ssl.wrap_socket=sslwrap(ssl.wrap_socket)
+            WSGIServer((self.setts.ip, self.setts.port), self.flaskApp, log=('default' if self.setts.debug else False), keyfile=self.setts.ssl[0], certfile=self.setts.ssl[1], ssl_version=ssl.PROTOCOL_TLSv1_2).serve_forever() #ssl.PROTOCOL_SSLv23
+         else:
+            WSGIServer((self.setts.ip, self.setts.port), self.flaskApp, log=('default' if self.setts.debug else False)).serve_forever()
       else:
          self.logger('SERVER RUNNING..')
-         self.flaskApp.run(host=self.setts.ip, port=self.setts.port, debug=self.setts.debug, threaded=not(self.setts.blocking))
+         if not self.setts.debug:
+            import logging
+            log=logging.getLogger('werkzeug')
+            log.setLevel(logging.ERROR)
+         if self.setts.ssl:
+            import ssl
+            context=ssl.SSLContext(ssl.PROTOCOL_TLSv1_2) #SSL.Context(SSL.SSLv23_METHOD)
+            context.load_cert_chain(self.setts.ssl[1], self.setts.ssl[0])
+            self.flaskApp.run(host=self.setts.ip, port=self.setts.port, ssl_context=context, debug=self.setts.debug, threaded=not(self.setts.blocking))
+         else:
+            self.flaskApp.run(host=self.setts.ip, port=self.setts.port, debug=self.setts.debug, threaded=not(self.setts.blocking))
+
+   # def createSSLTunnel(self, port_https, port_http, sslCert='', sslKey='', stunnel_configPath='/home/sslCert/', stunnel_exec='stunnel4', stunnel_configSample=None, stunnel_sslAllow='all', stunnel_sslOptions='-NO_SSLv2 -NO_SSLv3', stunnel_logLevel=4, stunnel_logFile='/home/python/logs/stunnel_%s.log'):
+   #    print 'Creating tunnel (localhost:%s --> localhost:%s)..'%(port_https, port_http)
+   #    configSample=self.fileGet(stunnel_configSample) if stunnel_configSample else """
+   #    debug = %(logLevel)s
+   #    output = /dev/null
+   #    foreground = yes
+   #    socket = l:TCP_NODELAY=1
+   #    socket = r:TCP_NODELAY=1
+
+   #    [myservice_%(name)s]
+   #    sslVersion = %(sslAllow)s
+   #    %(sslOptions)s
+   #    cert = %(sslCert)s
+   #    key = %(sslKey)s
+   #    accept  = %(portHttps)s
+   #    connect = %(portHttp)s
+   #    TIMEOUTclose = 10
+   #    TIMEOUTbusy     = 30
+   #    TIMEOUTconnect  = 10
+   #    TIMEOUTidle = 10
+   #    sessionCacheTimeout = 60
+   #    """
+   #    name=os.path.splitext(os.path.basename(sys.argv[0]))[0]
+   #    stunnel_sslOptions='\n'.join(['options = '+s for s in stunnel_sslOptions.split(' ') if s])
+   #    config={'name':name, 'logLevel':stunnel_logLevel, 'sslAllow':stunnel_sslAllow, 'sslOptions':stunnel_sslOptions, 'sslCert':sslCert, 'sslKey':sslKey, 'portHttps':port_https, 'portHttp':port_http}
+   #    config=configSample%config
+   #    configPath=stunnel_configPath+('stunnel_%s.conf'%name)
+   #    logPath=stunnel_logFile%name
+   #    self.fileWrite(configPath, config)
+   #    stunnel=subprocess.Popen([stunnel_exec, configPath], stderr=open(logPath, "w"))
+   #    time.sleep(1)
+   #    if stunnel.poll(): #error
+   #       s=self.fileGet(logPath)
+   #       s='[!] '+self.strGet(s, '[!]', '')
+   #       print '!!! ERROR creating tunnel\n', s
+   #       return False
+   #    def closeSSLTunnel():
+   #       try: os.system('pkill -f "%s %s"'%(stunnel_exec, configPath))
+   #       except: pass
+   #    atexit.register(closeSSLTunnel)
+   #    # def checkSSLTunnel():
+   #    #    badPatterns=['Connection rejected: too many clients']
+   #    #    while True:
+   #    #       time.sleep(3)
+   #    #       #! Здесь нужно проверять лог на наличие критических ошибок
+   #    #       stunnelLog=self.fileGet(logPath)
+   #    # thread_checkSSLTunnel=threading.Thread(target=checkSSLTunnel).start()
+   #    return stunnel
 
 """REQUEST-RESPONSE SAMPLES
 --> {"jsonrpc": "2.0", "method": "subtract", "params": [42, 23], "id": 1}
