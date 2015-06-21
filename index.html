@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+    <meta charset='utf-8'>
+    <meta http-equiv="X-UA-Compatible" content="chrome=1">
+    <meta name="description" content="flaskJSONRPCServer : A Python JSON-RPC over HTTP with flask and gevent">
+
+    <link rel="stylesheet" type="text/css" media="screen" href="stylesheets/stylesheet.css">
+
+    <title>flaskJSONRPCServer</title>
+  </head>
+
+  <body>
+
+    <!-- HEADER -->
+    <div id="header_wrap" class="outer">
+        <header class="inner">
+          <a id="forkme_banner" href="https://github.com/byaka/flaskJSONRPCServer">View on GitHub</a>
+
+          <h1 id="project_title">flaskJSONRPCServer</h1>
+          <h2 id="project_tagline">A Python JSON-RPC over HTTP with flask and gevent</h2>
+
+            <section id="downloads">
+              <a class="zip_download_link" href="https://github.com/byaka/flaskJSONRPCServer/zipball/master">Download this project as a .zip file</a>
+              <a class="tar_download_link" href="https://github.com/byaka/flaskJSONRPCServer/tarball/master">Download this project as a tar.gz file</a>
+            </section>
+        </header>
+    </div>
+
+    <!-- MAIN CONTENT -->
+    <div id="main_content_wrap" class="outer">
+      <section id="main_content" class="inner">
+        <p><a href="https://pypi.python.org/pypi/flaskJSONRPCServer"><img src="https://img.shields.io/pypi/v/flaskJSONRPCServer.png" alt="PyPI version"></a>
+<a href="https://pypi.python.org/pypi/flaskJSONRPCServer"><img src="https://img.shields.io/pypi/dm/flaskJSONRPCServer.png" alt="PyPI downloads"></a>
+<a href="http://www.apache.org/licenses/LICENSE-2.0.html"><img src="https://img.shields.io/pypi/l/flaskJSONRPCServer.svg" alt="License"></a></p>
+
+<h1>
+<a id="flaskjsonrpcserver" class="anchor" href="#flaskjsonrpcserver" aria-hidden="true"><span class="octicon octicon-link"></span></a>flaskJSONRPCServer</h1>
+
+<p>This library is an implementation of the JSON-RPC specification. It supports only 2.0 specification for now, which includes batch submission, keyword arguments, etc.</p>
+
+<h2>
+<a id="comments-bug-reports" class="anchor" href="#comments-bug-reports" aria-hidden="true"><span class="octicon octicon-link"></span></a>Comments, bug reports</h2>
+
+<p>flaskJSONRPCServer resides on <strong>github</strong>. You can file issues or pull requests <a href="https://github.com/byaka/flaskJSONRPCServer/issues">there</a>.</p>
+
+<h2>
+<a id="requirements" class="anchor" href="#requirements" aria-hidden="true"><span class="octicon octicon-link"></span></a>Requirements</h2>
+
+<ul>
+<li>Python &gt;=2.6</li>
+<li>Flask &gt;= 0.10 (not tested with older version)</li>
+<li>Gevent &gt;= 1.0 (optionally)</li>
+</ul>
+
+<h2>
+<a id="pros" class="anchor" href="#pros" aria-hidden="true"><span class="octicon octicon-link"></span></a>Pros</h2>
+
+<ul>
+<li>Lib tested over <strong>highload</strong> (&gt;=60 connections per second, 24/7 and it's not simulation) with <strong>Gevent</strong> enabled and no stability issues or memory leak (this is why i'm wrote this library)</li>
+<li>Auto <strong>CORS</strong>
+</li>
+<li>Simple switching to <strong>Gevent</strong> as backend</li>
+<li>Auto fallback to <strong>JSONP</strong> on GET requests (for old browsers, that don't support CORS like <strong>IE</strong>&lt;10)</li>
+<li>Dispatchers can simply get info about connection (<strong>IP</strong>, <strong>Cookies</strong>, <strong>Headers</strong>)</li>
+<li>Dispatchers can simply set <strong>Cookies</strong>, change output <strong>Headers</strong>, change output format for <strong>JSONP</strong> requests</li>
+<li>Lib can be simply integreted with another <strong>Flask</strong> app on the same IP:PORT</li>
+</ul>
+
+<h2>
+<a id="cons" class="anchor" href="#cons" aria-hidden="true"><span class="octicon octicon-link"></span></a>Cons</h2>
+
+<ul>
+<li>No <strong>documentation</strong>, only examples below (sorry, i not have time for now)</li>
+<li>Lib not handle <strong>Notification</strong> requests fully (for now client waiting, while server processes requests)</li>
+<li>Lib not has <strong>decorators</strong>, so it not a "Flask-way" (this can be simply added, but i not use decorators, sorry)</li>
+</ul>
+
+<h2>
+<a id="install" class="anchor" href="#install" aria-hidden="true"><span class="octicon octicon-link"></span></a>Install</h2>
+
+<p><code>pip install flaskJSONRPCServer</code></p>
+
+<h2>
+<a id="examples" class="anchor" href="#examples" aria-hidden="true"><span class="octicon octicon-link"></span></a>Examples</h2>
+
+<p>Simple server</p>
+
+<div class="highlight highlight-python"><pre><span class="pl-k">import</span> sys, time, random
+sys.path.append(<span class="pl-s"><span class="pl-pds">'</span>/var/python/libs/<span class="pl-pds">'</span></span>)
+sys.path.append(<span class="pl-s"><span class="pl-pds">'</span>/var/python/<span class="pl-pds">'</span></span>)
+sys.path.append(<span class="pl-s"><span class="pl-pds">'</span>/home/python/libs/<span class="pl-pds">'</span></span>)
+sys.path.append(<span class="pl-s"><span class="pl-pds">'</span>/home/python/<span class="pl-pds">'</span></span>)
+
+<span class="pl-k">from</span> flaskJSONRPCServer <span class="pl-k">import</span> flaskJSONRPCServer
+
+<span class="pl-k">class</span> <span class="pl-en">mySharedMethods</span>:
+   <span class="pl-k">def</span> <span class="pl-en">random</span>(<span class="pl-smi">self</span>, <span class="pl-smi">mult</span><span class="pl-k">=</span><span class="pl-c1">65536</span>):
+      <span class="pl-c"># Sipmly return random value (0..mult)</span>
+      <span class="pl-k">return</span> <span class="pl-c1">int</span>(random.random()<span class="pl-k">*</span>mult)
+
+<span class="pl-k">def</span> <span class="pl-en">echo</span>(<span class="pl-smi">data</span><span class="pl-k">=</span><span class="pl-s"><span class="pl-pds">'</span>Hello world!<span class="pl-pds">'</span></span>):
+   <span class="pl-c"># Simply echo</span>
+   <span class="pl-k">return</span> data
+
+<span class="pl-k">def</span> <span class="pl-en">myip</span>(<span class="pl-smi">_connection</span><span class="pl-k">=</span><span class="pl-c1">None</span>):
+   <span class="pl-c"># Return client's IP</span>
+   <span class="pl-k">return</span> <span class="pl-s"><span class="pl-pds">'</span>Hello, <span class="pl-c1">%s</span>!<span class="pl-pds">'</span></span><span class="pl-k">%</span>(_connection.ip)
+
+<span class="pl-k">def</span> <span class="pl-en">setcookie</span>(<span class="pl-smi">_connection</span><span class="pl-k">=</span><span class="pl-c1">None</span>):
+   <span class="pl-c"># Set cookie to client</span>
+   _connection.cookiesOut.append({<span class="pl-s"><span class="pl-pds">'</span>name<span class="pl-pds">'</span></span>:<span class="pl-s"><span class="pl-pds">'</span>myTestCookie<span class="pl-pds">'</span></span>, <span class="pl-s"><span class="pl-pds">'</span>value<span class="pl-pds">'</span></span>:<span class="pl-s"><span class="pl-pds">'</span>Your IP is <span class="pl-c1">%s</span><span class="pl-pds">'</span></span><span class="pl-k">%</span>_connection.ip})
+   <span class="pl-k">return</span> <span class="pl-s"><span class="pl-pds">'</span>Setted<span class="pl-pds">'</span></span>
+
+<span class="pl-k">def</span> <span class="pl-en">block</span>():
+   <span class="pl-c"># Test for notification request. When it fully implemented, client must  not wait for compliting this function</span>
+   time.sleep(<span class="pl-c1">10</span>)
+   <span class="pl-k">return</span> <span class="pl-s"><span class="pl-pds">'</span>ok<span class="pl-pds">'</span></span>
+
+<span class="pl-k">def</span> <span class="pl-en">stats</span>(<span class="pl-smi">_connection</span><span class="pl-k">=</span><span class="pl-c1">None</span>):
+   <span class="pl-c">#calculate connections per second</span>
+   tArr1<span class="pl-k">=</span>{<span class="pl-s"><span class="pl-pds">'</span>connPerSec_now<span class="pl-pds">'</span></span>:_connection.server.connPerMinute.count<span class="pl-k">/</span><span class="pl-c1">60.0</span>, <span class="pl-s"><span class="pl-pds">'</span>connPerSec_old<span class="pl-pds">'</span></span>:_connection.server.connPerMinute.oldCount<span class="pl-k">/</span><span class="pl-c1">60.0</span>, <span class="pl-s"><span class="pl-pds">'</span>speedStats<span class="pl-pds">'</span></span>:{}}
+   <span class="pl-c">#calculate spped stats</span>
+   <span class="pl-k">for</span> k, v <span class="pl-k">in</span> _connection.server.speedStats.items():
+      tArr1[<span class="pl-s"><span class="pl-pds">'</span>speedStats<span class="pl-pds">'</span></span>][k<span class="pl-k">+</span><span class="pl-s"><span class="pl-pds">'</span>_min<span class="pl-pds">'</span></span>]<span class="pl-k">=</span><span class="pl-c1">min</span>(v)
+      tArr1[<span class="pl-s"><span class="pl-pds">'</span>speedStats<span class="pl-pds">'</span></span>][k<span class="pl-k">+</span><span class="pl-s"><span class="pl-pds">'</span>_max<span class="pl-pds">'</span></span>]<span class="pl-k">=</span><span class="pl-c1">max</span>(v)
+      tArr1[<span class="pl-s"><span class="pl-pds">'</span>speedStats<span class="pl-pds">'</span></span>][k<span class="pl-k">+</span><span class="pl-s"><span class="pl-pds">'</span>_average<span class="pl-pds">'</span></span>]<span class="pl-k">=</span><span class="pl-c1">sum</span>(v)<span class="pl-k">/</span><span class="pl-c1">float</span>(<span class="pl-c1">len</span>(v))
+   <span class="pl-k">return</span> tArr1
+
+<span class="pl-k">def</span> <span class="pl-en">big</span>(<span class="pl-smi">_connection</span><span class="pl-k">=</span><span class="pl-c1">None</span>):
+   _connection.allowCompress<span class="pl-k">=</span><span class="pl-c1">True</span> <span class="pl-c">#allow compression for this method</span>
+   s<span class="pl-k">=</span><span class="pl-s"><span class="pl-pds">"""</span></span>
+<span class="pl-s">They say that if you sat an infinite number of monkeys with an infinite number of typewriters, then they would write the complete works of Shakespeare. This is known as the Infinite Monkey Theorem. I always feel it would be nice to try the actual experiment out. I mean all these monkeys with typewriters would be kinda cool.</span>
+<span class="pl-s"></span>
+<span class="pl-s">However wouldn't it be easier to get one monkey and one typewriter and give him an infinite amount of time to see how he goes?</span>
+<span class="pl-s"></span>
+<span class="pl-s">Although in theory it sounds simpler, getting hold of even a single monkey is not that easy.</span>
+<span class="pl-s"></span>
+<span class="pl-s">But what if we created a simulated monkey in Python? Now we are talking! That would be easy, and unlike a real monkey our simulated one could work all day and all night. No food required.</span>
+<span class="pl-s"></span>
+<span class="pl-s">Sounds like a plan for a blog post.</span>
+<span class="pl-s"></span>
+<span class="pl-s">However I want to give our virtual monkey a chance. If he managed to type the complete works of Shakespeare without worrying about punctuation, we would be happy right? Same goes for capital letters, let's just ignore them for now. We want to give him a fighting chance of completing his task.</span>
+<span class="pl-s"></span>
+<span class="pl-s">To help you get started I have taken a text file of the complete works of Shakespeare, and removed all punctuation and made all letters small. If any of you are thinking I did that by hand, think again. Python is your friend for automating tasks like that.</span>
+<span class="pl-s"></span>
+<span class="pl-s">Because the complete works is a large tome, I have also included a similar file, with just Hamlet. You can choose which one you want your monkey to attempt!</span>
+<span class="pl-s"></span>
+<span class="pl-s">As with all my blog posts I will give you the complete program first of all. Have a read through this and see how much of it you understand. Try and figure out those sections you don’t. I will then go through the program a line at a time explaining it in more detail.</span>
+<span class="pl-s">We do this by using scriptRead.count(monkeyTyped) &gt;= 1 What does that even mean? Well we take the complete works of Shakespeare stored in scriptRead, and we do a count of how many times the thing in the brackets appears. If we put monkeyTyped into the brackets then it will count how many times monkeyCount appeared in scriptRead. We only need it to appear once but if it appears more than once, then that is ok as well. We check this with the greater than or equal to symbol &gt;=.</span>
+<span class="pl-s"></span>
+<span class="pl-s">But the line also has monkeyTyped = ''. Why is that? Well when we start off this while loop the monkey has not typed anything, as we have set the variable to = '' , which means an empty string. This would mean our while loop would be false straight away, and our monkey would never start typing.</span>
+<span class="pl-s"></span>
+<span class="pl-s">To get around this we us an or condition. We check that monkeyTyped is '' or scriptRead.count(monkeyTyped) &gt;= 1</span>
+<span class="pl-s"></span>
+<span class="pl-s">The next line is the line which does the actual typing.</span>
+<span class="pl-s">We take monkeyTyped and we add the result of (random.choice(string.ascii_lowercase + ' ')) onto it and save the result as monkeyTyped.</span>
+<span class="pl-s"></span>
+<span class="pl-s">What on earth is (random.choice(string.ascii_lowercase + ' ')) ?</span>
+<span class="pl-s"></span>
+<span class="pl-s">Well we want to simulate the monkey typing on a keyboard. We have already said to make it easy we will not ask for punctuation, although we should ask him for a space between words. Thats not too much to ask is it? We also said we will not be too concerned about it being in capital letters.</span>
+<span class="pl-s"></span>
+<span class="pl-s">So random.choice picks something from inside the brackets by random selection. So what have we put in the brackets. The first thing is</span>
+<span class="pl-s"></span>
+<span class="pl-s">string.ascii_lowercase</span>
+<span class="pl-s"></span>
+<span class="pl-s">This creates a string of the lower case ascii letters. i.e</span>
+<span class="pl-s"></span>
+<span class="pl-s">abcdefghijklmnopqrstuvwxyz</span>
+<span class="pl-s"></span>
+<span class="pl-s">We also add onto the end of that a space using ' '</span>
+<span class="pl-s"></span>
+<span class="pl-s">Now remember this has a space between the two speech-marks. This is different from when we are creating a blank string, which doesn't have a space.</span>
+<span class="pl-s"></span>
+<span class="pl-s">Once he has typed a word, the loop will start again and check if what has been typed is in the complete works. If it is he will continue. If not he will go to the else statement.</span>
+<span class="pl-s">Here we return what he has typed. However remember we only get to this place if what is typed is not in the complete works. That's no use to us! We will need to remove the last letter of what he typed, as it was that last letter we know to have made perfect Shakespeare prose into gibberish.</span>
+<span class="pl-s"></span>
+<span class="pl-s">So we return monkeyTyped[:-1] which returns everything up to the last letter but not the last letter.</span>
+<span class="pl-s"></span>
+<span class="pl-s">Ok back to where we were in the main program.</span>
+<span class="pl-s"></span>
+<span class="pl-s">Remember we said we would keep track of the number of key presses? Well lets update that now. We know the monkey has just typed a word, so it is easy to determine the size of that word and increase keyPresses by that amount. Oh but the monkey typed a letter which turned his prose into gibberish. We should add that on as well as we want our count to be accurate!</span>
+<span class="pl-s">This line checks to see if the number of key presses he has made is a multiple of 10,000. The <span class="pl-c1">% c</span>hecks if keyPresses / 10,000 has no remainder i.e. it is a multiple of 10,000. If it is then it will print the number of key-presses made. This only works if the key-presses are an exact multiple of 10,000. There will be times when the monkey is in the middle of a word when this happen, so it will not report back. However it reports enough to make you realise the monkey is still working and not fallen asleep.</span>
+<span class="pl-s"></span>
+<span class="pl-s">Remember to press F5 to save and run your program.</span>
+<span class="pl-s"></span>
+<span class="pl-s">That is the end of the program. All you need now it to download the complete works of Shakespeare or just Hamlet if thats what you want to use. Use the links below to do that.</span>
+<span class="pl-s">   <span class="pl-pds">"""</span></span>
+   <span class="pl-k">return</span> s
+
+<span class="pl-k">if</span> <span class="pl-c1">__name__</span><span class="pl-k">==</span><span class="pl-s"><span class="pl-pds">'</span>__main__<span class="pl-pds">'</span></span>:
+   <span class="pl-k">print</span> <span class="pl-s"><span class="pl-pds">'</span>Running api..<span class="pl-pds">'</span></span>
+   <span class="pl-c"># Creating instance of server</span>
+   <span class="pl-c">#    &lt;blocking&gt;      set is this server async</span>
+   <span class="pl-c">#    &lt;cors&gt;          switch auto CORS support</span>
+   <span class="pl-c">#    &lt;gevent&gt;        switch to using Gevent as backend</span>
+   <span class="pl-c">#    &lt;debug&gt;         switch to logging connection's info from Flask</span>
+   <span class="pl-c">#    &lt;log&gt;           switch to logging debug info from flaskJSONRPCServer</span>
+   <span class="pl-c">#    &lt;fallback&gt;      switch auto fallback to JSONP on GET requests</span>
+   <span class="pl-c">#    &lt;allowCompress&gt; switch auto compression</span>
+   server<span class="pl-k">=</span>flaskJSONRPCServer((<span class="pl-s"><span class="pl-pds">"</span>0.0.0.0<span class="pl-pds">"</span></span>, <span class="pl-c1">7001</span>), <span class="pl-smi">blocking</span><span class="pl-k">=</span><span class="pl-c1">False</span>, <span class="pl-smi">cors</span><span class="pl-k">=</span><span class="pl-c1">True</span>, <span class="pl-smi">gevent</span><span class="pl-k">=</span><span class="pl-c1">False</span>, <span class="pl-smi">debug</span><span class="pl-k">=</span><span class="pl-c1">False</span>, <span class="pl-smi">log</span><span class="pl-k">=</span><span class="pl-c1">True</span>, <span class="pl-smi">fallback</span><span class="pl-k">=</span><span class="pl-c1">True</span>, <span class="pl-smi">allowCompress</span><span class="pl-k">=</span><span class="pl-c1">False</span>)
+   <span class="pl-c"># Register dispatcher for all methods of instance</span>
+   server.registerInstance(mySharedMethods(), <span class="pl-smi">path</span><span class="pl-k">=</span><span class="pl-s"><span class="pl-pds">'</span>/api<span class="pl-pds">'</span></span>)
+   <span class="pl-c"># Register dispatchers for single functions</span>
+   server.registerFunction(setcookie, <span class="pl-smi">path</span><span class="pl-k">=</span><span class="pl-s"><span class="pl-pds">'</span>/api<span class="pl-pds">'</span></span>)
+   server.registerFunction(echo, <span class="pl-smi">path</span><span class="pl-k">=</span><span class="pl-s"><span class="pl-pds">'</span>/api<span class="pl-pds">'</span></span>)
+   server.registerFunction(block, <span class="pl-smi">path</span><span class="pl-k">=</span><span class="pl-s"><span class="pl-pds">'</span>/api<span class="pl-pds">'</span></span>)
+   server.registerFunction(myip, <span class="pl-smi">path</span><span class="pl-k">=</span><span class="pl-s"><span class="pl-pds">'</span>/api<span class="pl-pds">'</span></span>)
+   big._alias<span class="pl-k">=</span><span class="pl-s"><span class="pl-pds">'</span>bigdata<span class="pl-pds">'</span></span> <span class="pl-c">#setting alias for method</span>
+   server.registerFunction(big, <span class="pl-smi">path</span><span class="pl-k">=</span><span class="pl-s"><span class="pl-pds">'</span>/api<span class="pl-pds">'</span></span>)
+   server.registerFunction(stats, <span class="pl-smi">path</span><span class="pl-k">=</span><span class="pl-s"><span class="pl-pds">'</span>/api<span class="pl-pds">'</span></span>)
+   <span class="pl-c"># Run server</span>
+   server.serveForever()
+   <span class="pl-c"># Now you can access this api by path http://127.0.0.1:7001/api for JSON-RPC requests</span>
+   <span class="pl-c"># Or by path http://127.0.0.1:7001/api/&lt;method&gt;?jsonp=&lt;callback&gt;&amp;(params) for JSONP requests</span>
+   <span class="pl-c">#    For example by http://127.0.0.1:7001/api/echo?data=test_data&amp;jsonp=jsonpCallback_129620</span>
+</pre></div>
+
+<h2>
+<a id="license" class="anchor" href="#license" aria-hidden="true"><span class="octicon octicon-link"></span></a>License</h2>
+
+<p>It is licensed under the Apache License, Version 2.0 (<a href="http://www.apache.org/licenses/LICENSE-2.0.html">read</a>).</p>
+      </section>
+    </div>
+
+    <!-- FOOTER  -->
+    <div id="footer_wrap" class="outer">
+      <footer class="inner">
+        <p class="copyright">flaskJSONRPCServer maintained by <a href="https://github.com/byaka">byaka</a></p>
+        <p>Published with <a href="https://pages.github.com">GitHub Pages</a></p>
+      </footer>
+    </div>
+
+    
+
+  </body>
+</html>
