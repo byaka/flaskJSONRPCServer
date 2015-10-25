@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 __ver_major__ = 0
 __ver_minor__ = 5
-__ver_patch__ = 1
+__ver_patch__ = 2
 __ver_sub__ = ""
 __version__ = "%d.%d.%d%s" % (__ver_major__, __ver_minor__, __ver_patch__, __ver_sub__)
 """
@@ -733,7 +733,7 @@ class flaskJSONRPCServer:
       if self.setts.gevent:
          self._logger('SERVER RUNNING AS GEVENT..')
          try: import gevent
-         except ImportError: self.throw('gevent backend not found')
+         except ImportError: self._throw('gevent backend not found')
          self._importAll()
          from gevent import monkey
          monkey.patch_all()
