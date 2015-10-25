@@ -1,2 +1,5 @@
+/.command_for_build_sphinx
 /.command_for_upload_to_PyPi
+/.sphinx-build
+/.sphinx-release
 *.pyc

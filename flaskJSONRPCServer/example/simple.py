@@ -1,20 +1,21 @@
 # -*- coding: utf-8 -*-
 import sys, time, random
-sys.path.append('/var/python/libs/')
-sys.path.append('/var/python/')
-sys.path.append('/home/python/libs/')
-sys.path.append('/home/python/')
-
 from flaskJSONRPCServer import flaskJSONRPCServer
 
 class mySharedMethods:
-   def random(self, mult=65536):
+   def random(self):
       # Sipmly return random value (0..mult)
-      return int(random.random()*mult)
+      return int(random.random()*65536)
+
+class mySharedMethods2:
+   def random(self):
+      # Sipmly return random value (0..mult)
+      return round(random.random()*1, 1)
 
 def echo(data='Hello world!'):
    # Simply echo
    return data
+echo._alias='helloworld' #setting alias for method
 
 def myip(_connection=None):
    # Return client's IP
@@ -22,26 +23,16 @@ def myip(_connection=None):
 
 def setcookie(_connection=None):
    # Set cookie to client
-   _connection.cookiesOut.append({'name':'myTestCookie', 'value':'Your IP is %s'%_connection.ip})
+   print _connection.cookies
+   _connection.cookiesOut.append({'name':'myTestCookie', 'value':'Your IP is %s'%_connection.ip, 'domain':'byaka.name'})
    return 'Setted'
 
-def block():
-   # Test for notification request. When it fully implemented, client must  not wait for compliting this function
-   time.sleep(10)
-   return 'ok'
-
 def stats(_connection=None):
-   #calculate connections per second
-   tArr1={'connPerSec_now':round(_connection.server.connPerMinute.count/60.0, 2), 'connPerSec_old':round(_connection.server.connPerMinute.oldCount/60.0, 2), 'connPerSec_max':round(_connection.server.connPerMinute.maxCount/60.0, 2), 'speedStats':{}}
-   #calculate spped stats
-   for k, v in _connection.server.speedStats.items():
-      tArr1['speedStats'][k+'_min']=round(min(v), 2)
-      tArr1['speedStats'][k+'_max']=round(max(v), 2)
-      tArr1['speedStats'][k+'_average']=round(sum(v)/float(len(v)), 2)
-   return tArr1
+   #return server's speed stats
+   return _connection.server.stats(inMS=True) #inMS=True return stats in milliseconds
 
 def big(_connection=None):
-   _connection.allowCompress=True #allow compression for this method
+   _connection.allowCompress=True #allow compression for this method only
    s="""
 They say that if you sat an infinite number of monkeys with an infinite number of typewriters, then they would write the complete works of Shakespeare. This is known as the Infinite Monkey Theorem. I always feel it would be nice to try the actual experiment out. I mean all these monkeys with typewriters would be kinda cool.
 
@@ -101,25 +92,31 @@ That is the end of the program. All you need now it to download the complete wor
    """
    return s
 
+big._alias=['bigdata', 'compressed'] #setting alias for method
+
 if __name__=='__main__':
    print 'Running api..'
    # Creating instance of server
-   #    <blocking>      set is this server async
-   #    <cors>          switch auto CORS support
-   #    <gevent>        switch to using Gevent as backend
-   #    <debug>         switch to logging connection's info from Flask
-   #    <log>           switch to logging debug info from flaskJSONRPCServer
-   #    <fallback>      switch auto fallback to JSONP on GET requests
-   #    <allowCompress> switch auto compression
-   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=True, fallback=True, allowCompress=False)
+   #    <blocking>         switch server to sync mode when <gevent> is False
+   #    <cors>             switch auto CORS support
+   #    <gevent>           switch to using Gevent as backend
+   #    <debug>            switch to logging connection's info from Flask
+   #    <log>              switch to logging debug info from flaskJSONRPCServer
+   #    <fallback>         switch auto fallback to JSONP on GET requests
+   #    <allowCompress>    switch auto compression
+   #    <compressMinSize>  set min limit for compression
+   #    <tweakDescriptors> set descriptor's limit for server
+   #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
+   #    <notifBackend>     set backend for Notify-requests
+   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000])
    # Register dispatcher for all methods of instance
    server.registerInstance(mySharedMethods(), path='/api')
+   # same name, but another path
+   server.registerInstance(mySharedMethods2(), path='/api2')
    # Register dispatchers for single functions
    server.registerFunction(setcookie, path='/api')
    server.registerFunction(echo, path='/api')
-   server.registerFunction(block, path='/api')
    server.registerFunction(myip, path='/api')
-   big._alias='bigdata' #setting alias for method
    server.registerFunction(big, path='/api')
    server.registerFunction(stats, path='/api')
    # Run server
