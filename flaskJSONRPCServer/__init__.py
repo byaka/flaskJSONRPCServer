@@ -25,11 +25,30 @@ __version__ = "%d.%d.%d%s" % (__ver_major__, __ver_minor__, __ver_patch__, __ver
    limitations under the License.
 """
 
-import sys, inspect, decimal, random, json, datetime, time, resource, os, zipfile, imp, urllib2
-from multiprocessing import Process
+import sys, inspect, decimal, random, json, datetime, time, resource, os, zipfile, imp, urllib2, hashlib, httplib, urllib
+from types import InstanceType, IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, ModuleType, FunctionType
 Flask=None
 request=None
 Response=None
+
+class UnixHTTPConnection(httplib.HTTPConnection):
+   """
+   This class adds support for unix-domain sockets to Python's httplib package.
+   Thx to Erik van Zijst.
+   https://bitbucket.org/evzijst/uhttplib/overview
+   """
+   def __init__(self, path, host='localhost', port=None, strict=None, timeout=None, socketClass=None):
+      httplib.HTTPConnection.__init__(self, host, port=port, strict=strict, timeout=timeout)
+      self.path=path
+      if socketClass: self.socketClass=socketClass
+      else:
+         import socket
+         self.socketClass=socket
+
+   def connect(self):
+      sock=self.socketClass.socket(self.socketClass.AF_UNIX, self.socketClass.SOCK_STREAM)
+      sock.connect(self.path)
+      self.sock=sock
 
 class magicDict(dict):
    """Get and set values like in Javascript (dict.<key>)"""
@@ -54,7 +73,7 @@ class flaskJSONRPCServer:
       :param str|dict|func notifBackend: Select Notif-backend for processing notify-requests. Lib include blocking backend ('simple') and non-blocking backend ('threadPool'). ThreadPool backend automatically switching to coroutines if gevent used. If this parameter 'dict' type, it must contain 'add' key as function. This function be called on notify-request. Optionally it can contain 'init' key as function and be called when server starting. If this parameter 'func' type, it will used like 'add'.
    """
 
-   def __init__(self, ipAndPort, blocking=False, cors=False, gevent=False, debug=False, log=True, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=1024, jsonBackend='simplejson', notifBackend='simple'):
+   def __init__(self, bindAdress, blocking=False, cors=False, gevent=False, debug=False, log=True, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=1024, jsonBackend='simplejson', notifBackend='simple', dispatcherBackend='simple'):
       self.consoleColor=magicDict({'header':'\033[95m', 'okblue':'\033[94m', 'okgreen':'\033[92m', 'warning':'\033[93m', 'fail':'\033[91m', 'end':'\033[0m', 'bold':'\033[1m', 'underline':'\033[4m'})
       # Flask imported here for avoiding error in setup.py if Flask not installed yet
       global Flask, request, Response
@@ -62,9 +81,13 @@ class flaskJSONRPCServer:
       self._tweakLimit(tweakDescriptors)
       self.flaskAppName='_flaskJSONRPCServer:%s_'%(int(random.random()*99999))
       self.version=__version__
+      if len(bindAdress)!=2: self._throw('Wrong "bindAdress" parametr')
+      isSocket=str(type(bindAdress[1])) in ["<class 'socket._socketobject'>", "<class 'gevent.socket.socket'>"]
       self.setts=magicDict({
-         'ip':ipAndPort[0],
-         'port':ipAndPort[1],
+         'ip':bindAdress[0] if not isSocket else None,
+         'port':bindAdress[1] if not isSocket else None,
+         'socketPath':bindAdress[0] if isSocket else None,
+         'socket':bindAdress[1] if isSocket else None,
          'blocking':blocking,
          'fallback_JSONP':fallback,
          'CORS':cors,
@@ -100,13 +123,21 @@ class flaskJSONRPCServer:
       # select Notif-backend
       self.notifBackend={}
       if notifBackend in ['threadPool', 'threadPoolReal']: #backend with non-blocking executing
-         from collections import deque
-         self.notifBackend={'add':self._notifBackend_threadPool_add, 'init':self._notifBackend_threadPool_init, 'settings':magicDict({'poolSize':5, 'sleep':0.02, 'forceReal':(notifBackend=='threadPoolReal')}), 'queue':deque(), 'poolSize':0}
+         self.notifBackend={'add':self._notifBackend_threadPool_add, 'init':self._notifBackend_threadPool_init, 'settings':magicDict({'poolSize':5, 'sleepTime_wait':0.02, 'forceReal':(notifBackend=='threadPoolReal')})}
       elif notifBackend=='simple': #backend with blocking executing (like standart requests)
          self.notifBackend={'add':False}
       elif self._isDict(notifBackend): self.notifBackend=notifBackend
       elif self._isFunction(notifBackend): self.notifBackend={'add':notifBackend}
       else: self._throw('Unknow Notif-backend type: %s'%type(notifBackend))
+      # select Dispatcher-backend
+      self.dispatcherBackend={}
+      if dispatcherBackend in dispatcherBackendMap: #backend with non-blocking executing
+         self.dispatcherBackend=dispatcherBackendMap[dispatcherBackend]()
+      elif dispatcherBackend=='simple': #backend with blocking executing (like standart requests)
+         self.dispatcherBackend=magicDict({'add':False})
+      elif self._isDict(dispatcherBackend): self.dispatcherBackend=magicDict(dispatcherBackend)
+      elif self._isInstance(dispatcherBackend): self.dispatcherBackend=dispatcherBackend
+      else: self._throw('Unknow Dispatcher-backend type: %s'%type(dispatcherBackend))
       # prepare speedStats
       self.speedStats={}
       self.speedStatsMax={}
@@ -122,14 +153,14 @@ class flaskJSONRPCServer:
          if s in urlNow: continue
          self.flaskApp.add_url_rule(rule=s, view_func=h, methods=['GET', 'OPTIONS', 'POST'], strict_slashes=False)
 
-   def _import(self, modules, scope=None):
+   def _import(self, modules, scope=None, forceDelete=False):
       """ replace existed imported module and monke_putch if needed """
       # if scope is None: scope=globals()
       #! Add checking with "monkey.is_module_patched()""
       for k, v in modules.items(): #delete existed
-         # if k in sys.modules: del sys.modules[k]
          if k in globals(): del globals()[k]
          if scope is not None and k in scope: del scope[k]
+         if forceDelete and k in sys.modules: del sys.modules[k] # this allow unpatch monkey_patched libs
       if self.setts.gevent: #patching
          from gevent import monkey
          for k, v in modules.items():
@@ -142,20 +173,20 @@ class flaskJSONRPCServer:
          if scope is not None: scope[k]=m
       return scope
 
-   def _importThreading(self, scope=None):
+   def _importThreading(self, scope=None, forceDelete=False):
       modules={
          'threading':None,
          'thread':['patch_thread', {'threading':True}], #'_threading_local':True, 'Event':False'logging':True, 'existing_locks':True
          'time':'patch_time'
       }
-      return self._import(modules, scope=scope)
+      return self._import(modules, scope=scope, forceDelete=forceDelete)
 
-   def _importSocket(self, scope=None):
+   def _importSocket(self, scope=None, forceDelete=False):
       modules={
          'socket':['patch_socket', {'dns':True, 'aggressive':True}],
          'ssl':'patch_ssl'
       }
-      return self._import(modules, scope=scope)
+      return self._import(modules, scope=scope, forceDelete=forceDelete)
 
    def _importAll(self, scope=None):
       self._importThreading(scope=scope)
@@ -203,6 +234,8 @@ class flaskJSONRPCServer:
 
    def _isFunction(self, o): return hasattr(o, '__call__')
 
+   def _isInstance(self, o): return isinstance(o, (InstanceType))
+
    def _isArray(self, o): return isinstance(o, (list))
 
    def _isDict(self, o): return isinstance(o, (dict))
@@ -249,36 +282,59 @@ class flaskJSONRPCServer:
       if i2==-1: return default
       return text[i1+len(pref):i2]
 
+   def _sha1(self, text):
+      #wrapper for sha1
+      try:
+         try: c=hashlib.sha1(text)
+         except UnicodeEncodeError: c=hashlib.sha1(text.encode('utf8'))
+         return c.hexdigest()
+      except Exception, e:
+         self._logger('ERROR in _sha1():', e)
+         return str(random.randint(99999, 9999999))
+
+   def _sha256(self, text):
+      #wrapper for sha256
+      try:
+         try: c=hashlib.sha256(text)
+         except UnicodeEncodeError: c=hashlib.sha256(text.encode('utf8'))
+         return c.hexdigest()
+      except Exception, e:
+         self._logger('ERROR in _sha256():', e)
+         return str(random.randint(99999, 9999999))
+
    def _throw(self, data):
       raise ValueError(data)
 
-   def _notifBackend_threadPool_add(self, path, dataIn, request):
-      #callback for adding notif to queue
-      try:
-         self.notifBackend['queue'].append({'path':path, 'dataIn':dataIn, 'request':request, 'mytime':self._getms()})
-         return True, len(self.notifBackend['queue'])
-      except Exception, e:
-         print '!!! ERROR_add', e
-         return None, str(e)
+   def _sleep(self, s):
+      if str(type(time.sleep))=="<type 'builtin_function_or_method'>" and self.setts.gevent:
+         # if gevent=True, we need patched 'sleep()' method
+         self._importThreading()
+      elif str(type(time.sleep))=="<type 'function'>" and not self.setts.gevent:
+         # if gevent=False, we need original 'sleep()' method
+         self._importThreading(forceDelete=True)
+      time.sleep(s)
 
    def _notifBackend_threadPool_init(self):
       if self.notifBackend.get('_cicleThread', None): return
       if self.notifBackend['settings'].forceReal and self.setts.gevent:
          self._logger('Warning: notifBackend forced to use Native Threads')
+      from collections import deque
+      self.notifBackend['queue']=deque()
+      self.notifBackend['poolSize']=0
       #main cicle for processing notifs. Run or strating server
       def tFunc_cicle():
          while True:
             self._deepWait()
-            time.sleep(self.notifBackend['settings'].sleep)
+            self._sleep(self.notifBackend['settings'].sleepTime_wait)
             try: tArr1=self.notifBackend['queue'].popleft()
             except Exception, e:
                if len(self.notifBackend['queue']):
-                  self._logger('ERROR in notifBackend.queue.pop(): %s', e)
-               time.sleep(1)
+                  self._logger('ERROR in notifBackend.queue.pop():', e)
+               self._sleep(1)
                continue
             mytime=self._getms()
             while self.notifBackend['poolSize']>=self.notifBackend['settings'].poolSize:
-               time.sleep(self.notifBackend['settings'].sleep)
+               self._sleep(self.notifBackend['settings'].sleepTime_wait)
             self.notifBackend['poolSize']+=1
             self._speedStatsAdd('notifBackend_wait', self._getms()-mytime)
             isForceReal=self.notifBackend['settings'].forceReal and self.setts.gevent
@@ -286,10 +342,19 @@ class flaskJSONRPCServer:
       def tFunc_processing(p, threaded=False):
          status, params, result=self._callDispatcher(p['path'], p['dataIn'], p['request'], threaded=threaded)
          if not status:
-            self._logger('ERROR in notifBackend._callDispatcher(): %s', result)
+            self._logger('ERROR in notifBackend._callDispatcher():', result)
             print '!!! ERROR_processing', result
          self.notifBackend['poolSize']-=1
       self.notifBackend['_cicleThread']=self._thread(tFunc_cicle)
+
+   def _notifBackend_threadPool_add(self, path, dataIn, request):
+      #callback for adding notif to queue
+      try:
+         self.notifBackend['queue'].append({'path':path, 'dataIn':dataIn, 'request':request, 'mytime':self._getms()})
+         return True, len(self.notifBackend['queue'])
+      except Exception, e:
+         print '!!! ERROR _notifBackend_threadPool_add', e
+         return None, str(e)
 
    def _thread(self, target, args=None, kwargs=None, forceReal=False):
       if forceReal: #force using NATIVE python threads, insted of coroutines
@@ -300,6 +365,26 @@ class flaskJSONRPCServer:
          t=threading.Thread(target=target, args=args or [], kwargs=kwargs or {})
          t.start()
       return t
+
+   def _importGlobalsFromParent(self, scope=None, typeOf=[IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, ModuleType, FunctionType]):
+      """
+      This function import global attrs from parent module (main program) to given scope.
+      Imported attrs can be filtered by type.
+      Source based on http://stackoverflow.com/a/9493520/5360266
+      """
+      scope=scope if scope is not None else globals()
+      main=sys.argv[0]
+      try:
+         for stk in inspect.stack():
+            # find frame of parent by module's path
+            if main!=stk[1]: continue
+            m=inspect.getmodule(stk[0])
+            for k in dir(m):
+               # check type if needed
+               if typeOf is None or isinstance(getattr(m, k), tuple(typeOf)): scope[k]=getattr(m, k)
+            break
+      except Exception, e:
+         self._throw("Cant import parent's globals: %s"%e)
 
    def _speedStatsAdd(self, name, val):
       if name not in self.speedStats: self.speedStats[name]=[]
@@ -318,6 +403,7 @@ class flaskJSONRPCServer:
       :param instance dispatcher: Class's instance.
       :param str path: Optional string that contain path-prefix.
       """
+      if not self._isInstance(dispatcher): self._throw('Bad dispatcher type: %s'%type(dispatcher))
       fallback=self.setts.fallback_JSONP if fallback is None else fallback
       path=path or '/'
       path=path if path.startswith('/') else '/'+path
@@ -330,12 +416,8 @@ class flaskJSONRPCServer:
             if hasattr(link, '_alias'):
                tArr1=link._alias if self._isArray(link._alias) else [link._alias]
                for alias in tArr1:
-                  if self._isString(alias): self.routes[path][alias]=magicDict({'allowJSONP':fallback, 'link':link})
-      #register dispatcher
-      # if self.setts.fallback_JSONP: #additional path for support JSONP
-      #    path_jsonp=path+('/' if path[-1]!='/' else '')+'<method>'
-      #    self.flaskApp.add_url_rule(rule=path_jsonp, view_func=self._requestHandler, methods=['GET', 'OPTIONS', 'POST'])
-      # self.flaskApp.add_url_rule(rule=path, view_func=self._requestHandler, methods=['GET', 'OPTIONS', 'POST'])
+                  if self._isString(alias):
+                     self.routes[path][alias]=magicDict({'allowJSONP':fallback, 'link':link})
 
    def registerFunction(self, dispatcher, path='', fallback=None, name=None):
       """Create dispatcher for given function.
@@ -345,6 +427,7 @@ class flaskJSONRPCServer:
       :param func dispatcher: Link to function.
       :param str path: Optional string that contain path-prefix.
       """
+      if not self._isFunction(dispatcher): self._throw('Bad dispatcher type: %s'%type(dispatcher))
       fallback=self.setts.fallback_JSONP if fallback is None else fallback
       name=name or dispatcher.__name__
       path=path or '/'
@@ -355,17 +438,19 @@ class flaskJSONRPCServer:
       if hasattr(dispatcher, '_alias'):
          tArr1=dispatcher._alias if self._isArray(dispatcher._alias) else [dispatcher._alias]
          for alias in tArr1:
-            if self._isString(alias): self.routes[path][alias]=magicDict({'allowJSONP':fallback, 'link':dispatcher})
-      #register dispatcher
-      # if self.setts.fallback_JSONP: #additional path for support JSONP
-      #    path_jsonp=path+('/' if path[-1]!='/' else '')+'<method>'
-      #    self.flaskApp.add_url_rule(rule=path_jsonp, view_func=self._requestHandler, methods=['GET', 'OPTIONS', 'POST'])
-      # self.flaskApp.add_url_rule(rule=path, view_func=self._requestHandler, methods=['GET', 'OPTIONS', 'POST'])
+            if self._isString(alias):
+               self.routes[path][alias]=magicDict({'allowJSONP':fallback, 'link':dispatcher})
+
+   def _parseJSON(self, data):
+      mytime=self._getms()
+      s=self.jsonBackend.loads(data)
+      self._speedStatsAdd('parseRequest', self._getms()-mytime)
+      return s
 
    def _parseRequest(self, data):
       try:
          mytime=self._getms()
-         tArr1=self.jsonBackend.loads(data)
+         tArr1=self._parseJSON(data)
          tArr2=[]
          tArr1=tArr1 if self._isArray(tArr1) else [tArr1] #support for batch requests
          for r in tArr1:
@@ -390,12 +475,12 @@ class flaskJSONRPCServer:
       elif isinstance(o, (datetime.datetime, datetime.date, datetime.time)): return o.isoformat() #fix DateTime conversion
       # elif self._isNum(o) and o>2**31: return str(o) #? fix LONG
 
-   def _serializeResponse(self, data):
+   def _serializeJSON(self, data):
       def _fixJSON(o):
          if self._isFunction(self.fixJSON): return self.fixJSON(o)
       mytime=self._getms()
       s=self.jsonBackend.dumps(data, indent=None, separators=(',',':'), ensure_ascii=True, sort_keys=True, default=_fixJSON)
-      self._speedStatsAdd('serializeResponse', self._getms()-mytime)
+      self._speedStatsAdd('serializeJSON', self._getms()-mytime)
       return s
 
    def _getErrorInfo(self):
@@ -408,7 +493,7 @@ class flaskJSONRPCServer:
       return s
 
    def stats(self, inMS=False):
-      res={'connPerSec_now':round(self.connPerMinute.count/60.0, 2), 'connPerSec_old':round(self.connPerMinute.oldCount/60.0, 2), 'connPerSec_max':round(self.connPerMinute.maxCount/60.0, 2), 'speedStats':{}}
+      res={'connPerSec_now':round(self.connPerMinute.count/60.0, 2), 'connPerSec_old':round(self.connPerMinute.oldCount/60.0, 2), 'connPerSec_max':round(self.connPerMinute.maxCount/60.0, 2), 'speedStats':{}, 'processingRequestCount':self.processingRequestCount, 'processingDispatcherCount':self.processingDispatcherCount}
       #calculate spped stats
       for k, v in self.speedStats.items():
          v1=max(v)
@@ -424,9 +509,12 @@ class flaskJSONRPCServer:
          try: sys.stdout.write(s)
          except:
             try:
-               s=self._serializeResponse(s)
-               sys.stdout.write(s if s else '') #! strUniDecode(s)
-            except: sys.stdout.write('<UNPRINTABLE DATA>')
+               s=self._serializeJSON(s)
+               try:
+                  sys.stdout.write(s if s else '')
+               except UnicodeEncodeError:
+                  sys.stdout.write(s.encode('utf8') if s else '')
+            except Exception, e: sys.stdout.write('<UNPRINTABLE DATA>')
          if i<len(args)-1: sys.stdout.write(' ')
       sys.stdout.write('\n')
 
@@ -442,7 +530,7 @@ class flaskJSONRPCServer:
          if self._isFunction(dispatcher): dispatcher.__locked=False if exclusive else None
 
    def wait(self, dispatcher=None, sleepMethod=None):
-      sleepMethod=sleepMethod or time.sleep
+      sleepMethod=sleepMethod or self._sleep
       if dispatcher is None: #global lock
          while self.locked: sleepMethod(self.sleepTime_lock) #global lock
       else: #local and global lock
@@ -460,7 +548,7 @@ class flaskJSONRPCServer:
       self.deepLocked=False
 
    def _deepWait(self):
-      while self.deepLocked: time.sleep(self.sleepTime_deepLock)
+      while self.deepLocked: self._sleep(self.sleepTime_deepLock)
 
    def _reload(self, api, clearOld=False, timeout=60):
       self._deepLock()
@@ -469,7 +557,7 @@ class flaskJSONRPCServer:
          if self._isNum(timeout) and self._getms()-mytime>=timeout*1000:
             self._logger('Warning: So long wait for completing requests(%s) and dispatchers(%s)'%(self.processingRequestCount, self.processingDispatcherCount))
             break
-         time.sleep(self.sleepTime_checkProcessing)
+         self._sleep(self.sleepTime_checkProcessing)
       if clearOld: self.routes={}
       api=api if self._isArray(api) else [api]
       for o in api:
@@ -529,30 +617,54 @@ class flaskJSONRPCServer:
          api.append({'dispatcher':dispatcher, 'path':path, 'isInstance':isInstance, 'name':name})
       self._thread(target=self._reload, kwargs={'api':api, 'clearOld':clearOld, 'timeout':timeout})
 
-   def _callDispatcher(self, path, data, request, isJSONP=False, threaded=None):
+   def _callDispatcher(self, path, data, request, isJSONP=False, threaded=None, overload=None):
       try:
          self.processingDispatcherCount+=1
          if not threaded:
-            sleepMethod=time.sleep
+            sleepMethod=self._sleep
          else:
             #import native time.sleep() for native threads
             from gevent import monkey
             sleepMethod=monkey.get_original('time', 'sleep')
          params={}
-         _args, _varargs, _keywords, _defaults=inspect.getargspec(self.routes[path][data['method']].link)
-         _args=[s for s in _args if s!='self']
+         dispatcher=self.routes[path][data['method']].link
+         _args, _, _, _=inspect.getargspec(dispatcher)
+         _args=[s for i, s in enumerate(_args) if not(i==0 and s=='self')]
          if self._isDict(data['params']): params=data['params']
-         elif self._isArray(data['params']):
-            #convert *args to **kwargs
-            for i in xrange(len(data['params'])):
-               params[_args[i]]=data['params'][i]
+         elif self._isArray(data['params']): #convert *args to **kwargs
+            for i, v in enumerate(data['params']): params[_args[i]]=v
          if '_connection' in _args: #add connection info if needed
-            params['_connection']=magicDict({'headers':dict([h for h in request.headers]), 'cookies':request.cookies, 'ip':request.environ.get('HTTP_X_REAL_IP', request.remote_addr), 'cookiesOut':[], 'headersOut':{}, 'jsonp':isJSONP, 'allowCompress':self.setts.allowCompress, 'server':self, 'sleepMethod':sleepMethod, 'threaded':threaded, 'notify':not('id' in data), 'dispatcher':self.routes[path][data['method']].link, 'path':path, 'dispatcherName':data['method']})
+            params['_connection']={
+               'headers':dict([h for h in request.headers]) if not self._isDict(request.headers) else request.headers,
+               'cookies':request.cookies,
+               'ip':request.environ.get('HTTP_X_REAL_IP', request.remote_addr),
+               'cookiesOut':[],
+               'headersOut':{},
+               'jsonp':isJSONP,
+               'allowCompress':self.setts.allowCompress,
+               'server':self,
+               'call':magicDict({
+                  'lock':lambda: self.lock(dispatcher=dispatcher),
+                  'unlock':lambda exclusive=False: self.unlock(dispatcher=dispatcher, exclusive=exclusive),
+                  'wait':lambda: self.wait(dispatcher=dispatcher, sleepMethod=sleepMethod),
+                  'sleep':sleepMethod,
+               }),
+               'threaded':threaded,
+               'notify':not('id' in data),
+               'dispatcher':dispatcher,
+               'path':path,
+               'dispatcherName':data['method']
+            }
+            # overload _connection
+            if self._isDict(overload):
+               for k, v in overload.items(): params['_connection'][k]=v
+            elif self._isFunction(overload): overload(params['_connection'])
+            params['_connection']=magicDict(params['_connection'])
          #locking
-         self.wait(self.routes[path][data['method']].link, sleepMethod=sleepMethod)
+         self.wait(dispatcher=dispatcher, sleepMethod=sleepMethod)
          #call dispatcher
          mytime=self._getms()
-         result=self.routes[path][data['method']].link(**params)
+         result=dispatcher(**params)
          self._speedStatsAdd('callDispatcher', self._getms()-mytime)
          self.processingDispatcherCount-=1
          return True, params, result
@@ -561,6 +673,7 @@ class flaskJSONRPCServer:
          return False, params, self._getErrorInfo()
 
    def _compress(self, resp):
+      # provide compression of response
       mytime=self._getms()
       from cStringIO import StringIO
       import gzip
@@ -575,6 +688,10 @@ class flaskJSONRPCServer:
       resp.headers['Content-Length']=len(resp.data)
       self._speedStatsAdd('compressResponse', self._getms()-mytime)
       return resp
+
+   def _copyRequestContext(self, request):
+      r=magicDict({'headers':dict([h for h in request.headers]), 'cookies':request.cookies, 'environ':request.environ, 'remote_addr':request.remote_addr, 'method':request.method, 'url':request.url, 'data':request.data, 'form':request.form, 'args':request.args})
+      return r
 
    def _requestHandler(self, path, method=None):
       # DeepLock
@@ -633,13 +750,22 @@ class flaskJSONRPCServer:
                   if not dataIn['id']: #notification request
                      if self.notifBackend.get('add', None):
                         # copy request's context
-                        r=magicDict({'headers':request.headers, 'cookies':request.cookies, 'environ':request.environ, 'remote_addr':request.remote_addr, 'method':request.method, 'url':request.url, 'data':request.data, 'form':request.form, 'args':request.args})
+                        r=self._copyRequestContext(request)
                         s, m=self.notifBackend['add'](path, dataIn, r)
                         if not s: error.append({"code": 500, "message": 'Error in notifBackend.add(): %s'%m})
-                     elif self.notifBackend.get('add', None) is False:
+                     else:
                         status, params, result=self._callDispatcher(path, dataIn, request)
                   else: #simple request
-                     status, params, result=self._callDispatcher(path, dataIn, request)
+                     if hasattr(self.dispatcherBackend, 'add') and hasattr(self.dispatcherBackend, 'check'):
+                        # generate unique id
+                        uniqueId='--'.join([str(dataIn['id']), str(random.randint(10000, 999999)), str(request.environ.get('HTTP_X_REAL_IP', request.remote_addr) or ''), self._sha1(request.get_data()), str(self._getms())])
+                        # copy request's context
+                        r=self._copyRequestContext(request)
+                        s, m=self.dispatcherBackend.add(uniqueId, path, dataIn, r)
+                        if not s: error.append({"code": 500, "message": 'Error in dispatcherBackend.add(): %s'%m})
+                        status, params, result=self.dispatcherBackend.check(uniqueId)
+                     else:
+                        status, params, result=self._callDispatcher(path, dataIn, request)
                      if status:
                         if '_connection' in params: #get additional headers and cookies
                            outHeaders.update(params['_connection'].headersOut)
@@ -662,7 +788,7 @@ class flaskJSONRPCServer:
             for d in out: dataOut.append(self._prepResponse(d, isError=False))
          elif len(out): #response for simple request
             dataOut=self._prepResponse(out[0], isError=False)
-         dataOut=self._serializeResponse(dataOut)
+         dataOut=self._serializeJSON(dataOut)
       elif request.method=='GET': #JSONP fallback
          self._logger('REQUEST:', method, request.args)
          jsonpCB=request.args.get('jsonp', False)
@@ -691,7 +817,7 @@ class flaskJSONRPCServer:
          self._logger('ERRORS:', error)
          self._logger('OUT:', out)
          if len(out): #response for simple request
-            dataOut=self._serializeResponse(out[0]['data'])
+            dataOut=self._serializeJSON(out[0]['data'])
             dataOut=out[0]['jsonpCB']%(dataOut)
       self._logger('RESPONSE:', dataOut)
       resp=Response(response=dataOut, status=200, mimetype=('text/javascript' if request.method=='GET' else 'application/json'))
@@ -717,7 +843,7 @@ class flaskJSONRPCServer:
          restartOn=restartOn if self._isArray(restartOn) else [restartOn]
          self.start(joinLoop=False)
          while True:
-            time.sleep(sleep)
+            self._sleep(sleep)
             for cb in restartOn:
                if self._isFunction(cb) and cb(self) is not True: continue
                elif cb=='checkFileDescriptor' and not self._checkFileDescriptor(multiply=1.25): continue
@@ -728,6 +854,7 @@ class flaskJSONRPCServer:
       """ Start server's loop """
       # start notifBackend
       if self.notifBackend.get('init', None): self.notifBackend['init']()
+      if hasattr(self.dispatcherBackend, 'init'): self.dispatcherBackend.init(self)
       # reset flask routing (it useful when somebody change self.flaskApp)
       self._registerUrl(dict([[s, self._requestHandler] for s in self.pathsDef]))
       if self.setts.gevent:
@@ -740,6 +867,7 @@ class flaskJSONRPCServer:
          from gevent.pywsgi import WSGIServer
          from gevent.pool import Pool
          self._serverPool=Pool(None)
+         bindAdress=(self.setts.ip, self.setts.port) if not self.setts.socket else self.setts.socket
          if self.setts.ssl:
             from gevent import ssl
             # from functools import wraps
@@ -750,9 +878,9 @@ class flaskJSONRPCServer:
             #       return func(*args, **kw)
             #    return bar
             # ssl.wrap_socket=sslwrap(ssl.wrap_socket)
-            self._server=WSGIServer((self.setts.ip, self.setts.port), self.flaskApp, log=('default' if self.setts.debug else False), spawn=self._serverPool, keyfile=self.setts.ssl[0], certfile=self.setts.ssl[1], ssl_version=ssl.PROTOCOL_TLSv1_2) #ssl.PROTOCOL_SSLv23
+            self._server=WSGIServer(bindAdress, self.flaskApp, log=('default' if self.setts.debug else False), spawn=self._serverPool, keyfile=self.setts.ssl[0], certfile=self.setts.ssl[1], ssl_version=ssl.PROTOCOL_TLSv1_2) #ssl.PROTOCOL_SSLv23
          else:
-            self._server=WSGIServer((self.setts.ip, self.setts.port), self.flaskApp, log=('default' if self.setts.debug else False), spawn=self._serverPool)
+            self._server=WSGIServer(bindAdress, self.flaskApp, log=('default' if self.setts.debug else False), spawn=self._serverPool)
          if joinLoop: self._server.serve_forever()
          else: self._server.start()
       else:
@@ -790,17 +918,15 @@ class flaskJSONRPCServer:
          if timeout and self._getms()-mytime>=timeout*1000:
             self._logger('Warning: So long wait for completing dispatchers(%s)'%(self.processingDispatcherCount))
             break
-         time.sleep(self.sleepTime_checkProcessing)
+         self._sleep(self.sleepTime_checkProcessing)
       if self.setts.gevent:
          try: self._server.stop(timeout=timeout-(self._getms()-mytime)/1000.0)
          except Exception, e:
             self._deepUnlock()
             self._throw(e)
       else:
-         #! try this
-         # ctx=self.flaskApp.test_request_context()
-         # ctx.push()
          self._werkzeugStopToken=str(int(random.random()*999999))
+         #! all other methods (test_client() and test_request_context()) not "return werkzeug.server.shutdown" in request.environ
          try:
             r=urllib2.urlopen('http://%s:%s/_werkzeugStop/?token=%s'%(self.setts.ip, self.setts.port, self._werkzeugStopToken)).read()
          except Exception, e: r=''
@@ -813,7 +939,7 @@ class flaskJSONRPCServer:
 
    def restart(self, timeout=20, processingDispatcherCountMax=0, werkzeugTimeout=3):
       self.stop(timeout=timeout, processingDispatcherCountMax=processingDispatcherCountMax)
-      if not self.setts.gevent: time.sleep(werkzeugTimeout) #! Without this werkzeug throw "adress already in use"
+      if not self.setts.gevent: self._sleep(werkzeugTimeout) #! Without this werkzeug throw "adress already in use"
       self.start()
 
    # def createSSLTunnel(self, port_https, port_http, sslCert='', sslKey='', stunnel_configPath='/home/sslCert/', stunnel_exec='stunnel4', stunnel_configSample=None, stunnel_sslAllow='all', stunnel_sslOptions='-NO_SSLv2 -NO_SSLv3', stunnel_logLevel=4, stunnel_logFile='/home/python/logs/stunnel_%s.log'):
@@ -847,7 +973,7 @@ class flaskJSONRPCServer:
    #    logPath=stunnel_logFile%name
    #    self._fileWrite(configPath, config)
    #    stunnel=subprocess.Popen([stunnel_exec, configPath], stderr=open(logPath, "w"))
-   #    time.sleep(1)
+   #    self._sleep(1)
    #    if stunnel.poll(): #error
    #       s=self._fileGet(logPath)
    #       s='[!] '+self._strGet(s, '[!]', '')
@@ -860,11 +986,205 @@ class flaskJSONRPCServer:
    #    # def checkSSLTunnel():
    #    #    badPatterns=['Connection rejected: too many clients']
    #    #    while True:
-   #    #       time.sleep(3)
+   #    #       self._sleep(3)
    #    #       #! Здесь нужно проверять лог на наличие критических ошибок
    #    #       stunnelLog=self._fileGet(logPath)
    #    # thread_checkSSLTunnel=threading.Thread(target=checkSSLTunnel).start()
    #    return stunnel
+
+class execBackend_parallelWithSocket:
+   def __init__(self, poolSize=10, importGlobalsFromParent=True, parentGlobals={}, sleepTimeCheck=0.02, sleepTimeWait=0.2):
+      self.settings=magicDict({
+         'poolSize':poolSize,
+         'sleepTime_check':sleepTimeCheck,
+         'sleepTime_wait':sleepTimeWait,
+         'importGlobalsFromParent':importGlobalsFromParent
+      })
+      from collections import deque
+      self.parentGlobals=parentGlobals or {}
+      self.queue=deque()
+      self.result={}
+      self.pool=[]
+      self._server=None
+
+   def init(self, server):
+      if self._server: return
+      # create api on unix-socket
+      server._importSocket()
+      listener=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+      socketPath=os.path.realpath(sys.argv[0])+'.sock'
+      if os.path.exists(socketPath): os.remove(socketPath)
+      listener.bind(socketPath)
+      listener.listen(1)
+      self._server=flaskJSONRPCServer([socketPath, listener], blocking=False, cors=False, gevent=server.setts.gevent, debug=False, log=False, fallback=False, allowCompress=False, jsonBackend='simplejson', tweakDescriptors=None)
+      self._parentServer=server
+      # self._server.parentServer=server # link to 'real-api-self' from 'unix-socket-api-self'
+      # self._server.parentGlobals=self.parentGlobals # link to 'parent-module-globals'
+      # import parent's globals if needed
+      if self.settings.importGlobalsFromParent:
+         server._importGlobalsFromParent(scope=self.parentGlobals)
+      self._server.registerFunction(self.api_queueGet, path='/queue', name='get')
+      self._server.registerFunction(self.api_queueResult, path='/queue', name='result')
+      self._server.registerFunction(self.api_parentVar, path='/parent', name='var')
+      self._server.registerFunction(self.api_parentEval, path='/parent', name='eval')
+      self._server.registerFunction(self.api_parentStats, path='/parent', name='stats')
+      self._server.start()
+      # start processesPool
+      import multiprocessing
+      # multiprocessing.cpu_count()
+      for i in xrange(self.settings.poolSize):
+         p=multiprocessing.Process(target=self.childCicle, args=(server, socketPath))
+         p.start()
+         self.pool.append(p)
+
+   def sendRequest(self, path, method, params=[]):
+      data={'jsonrpc': '2.0', 'id': '0', 'method': method, 'params':params}
+      self._conn.request('POST', path, self._parentServer._serializeJSON(data))
+      resp=self._conn.getresponse()
+      data2=resp.read()
+      data2=self._parentServer._parseJSON(data2)
+      return data2.get('result', None)
+
+   def childCicle(self, parentServer, socketPath):
+      self._parseRequest=parentServer
+      parentServer.setts.gevent=False
+      parentServer._importThreading(forceDelete=True)
+      parentServer._importSocket(forceDelete=True)
+      self._conn=UnixHTTPConnection(socketPath)
+      # overload for _callDispatcher
+      parentServer.stats=lambda inMS=False: self.sendRequest('/parent', 'stats', [inMS])
+      _callDispatcherOverload={
+         'call':{
+            'sleep':parentServer._sleep
+         },
+         'server':parentServer
+      }
+      # self.sendRequest('/parent', 'var', ['get', 'sexy_speedStats'])
+      # self.sendRequest('/parent', 'eval', ['test1()+str(random.randint(10000, 50000))'])
+      # main cicle
+      while True:
+         p=self.sendRequest('/queue', 'get')
+         if p:
+            p['request']=magicDict(p['request']) # _callDispatcher() work with request as object, not dict
+            status, params, result=parentServer._callDispatcher(p['path'], p['dataIn'], p['request'], overload=_callDispatcherOverload)
+            self.sendRequest('/queue', 'result', [p['uniqueId'], status, params, result])
+         parentServer._sleep(self.settings.sleepTime_wait)
+
+   def api_queueGet(self, _connection=None):
+      # get task
+      if not len(self.queue): return None
+      tArr1=self.queue.popleft()
+      self._parentServer.processingDispatcherCount+=1
+      return tArr1
+
+   def api_queueResult(self, uniqueId, status, params, result, _connection=None):
+      # set task's result
+      if params and '_connection' in params: # _requestHandler() work with this like object, not dict
+         params['_connection']=magicDict(params['_connection'])
+      self.result[uniqueId]=[status, params, result]
+      self._parentServer.processingDispatcherCount-=1
+
+   def api_parentStats(self, inMS, _connection=None):
+      return self._parentServer.stats(inMS=inMS)
+
+   def api_parentVar(self, do, path, _connection=None):
+      # get variable from parent by path
+      try:
+         obj=self.evalPath(path, scope=self.parentGlobals)
+         print '>>', obj
+      except Exception, e: print '!!', e
+
+   def api_parentEval(self, code, _connection=None):
+      # eval code in parent process
+      pass
+      try:
+         print '>>', eval(code, globals(), self.parentGlobals)
+      except Exception, e: print '!!', e
+
+   def add(self, uniqueId, path, dataIn, request):
+      #callback for adding request to queue
+      try:
+         self.queue.append({'uniqueId':uniqueId, 'path':path, 'dataIn':dataIn, 'request':request, 'mytime':self._server._getms()})
+         return True, len(self.queue)
+      except Exception, e:
+         print '!!! ERROR execBackend_parallelWithSocket.add', e
+         return None, str(e)
+
+   def check(self, uniqueId):
+      mytime=self._server._getms()
+      while not self.result.get(uniqueId, None):
+         self._server._sleep(self.settings.sleepTime_check)
+      self._parentServer._speedStatsAdd('execBackend_wait', self._server._getms()-mytime)
+      tArr=self.result[uniqueId]
+      del self.result[uniqueId]
+      return tArr[0], tArr[1], tArr[2] # status, params, result
+
+   def evalPath(self, path, scope=None):
+      """
+      This method retrive variable from <scope> by given <path>.
+      It's also support nested variables.
+      For example if <scope> contain this variables:
+         tmp1={'test1':1, 'test2':[{'test3':'2', 'test4':{'test5':3}}]}
+         tmp2=['test4', {'test10':'test4'}]
+         tmp3=['test10']
+      And given <path> is:
+         tmp1['test2'][0][tmp2[1][tmp3[0]]],
+      This method return:
+         {'test5': 3}
+      """
+      def range2str(s1, s2):
+         return [chr(i) for i in range(ord(s1), ord(s2)+1)]
+      scope=globals() if scope is None else scope
+      stack=[{'obj':None, 'name':'', 'mode':'', 'opened':0}]
+      stackI=0
+      letters=range2str('a', 'z')+['_']
+      nums=range2str('0', '9')
+      for i, s in enumerate(path):
+         if stack[stackI]['mode']!='s' and stack[stackI]['opened'] and s.lower() in letters:
+            #switch to new stack
+            stack.append({'obj':None, 'name':'', 'mode':'', 'opened':0})
+            stackI+=1
+         if s.lower() in letters:
+            if stack[stackI]['mode']=='i': stack[stackI]['mode']=''
+            stack[stackI]['name']+=s
+         if s in nums:
+            if not stack[stackI]['mode']: stack[stackI]['mode']='i'
+            stack[stackI]['name']+=s
+         #
+         if s in ['[']:
+            if stack[stackI]['obj'] is None and stack[stackI]['name']:
+               stack[stackI]['obj']=scope[stack[stackI]['name']]
+               stack[stackI]['name']=''
+               stack[stackI]['mode']=''
+            stack[stackI]['opened']+=1
+         if s in ['"', "'"]: stack[stackI]['mode']='s'
+         if s in [']']: stack[stackI]['opened']-=1
+         #
+         if stack[stackI]['opened']<0: #back to prev stack
+            if stack[stackI]['name']:
+               if stack[stackI]['obj'] is None: stack[stackI]['obj']=scope[stack[stackI]['name']]
+               else: stack[stackI]['obj'][stack[stackI]['name']]
+            o=stack[stackI]['obj']
+            del stack[stackI]
+            stackI-=1
+            stack[stackI]['obj']=stack[stackI]['obj'][o]
+            stack[stackI]['opened']-=1
+            continue
+         #
+         if i==len(path)-1 or (stack[stackI]['name'] and stack[stackI]['opened']<=0 and stack[stackI]['obj'] is not None):
+            if stack[stackI]['obj'] is None:
+               stack[stackI]['obj']=scope[stack[stackI]['name']]
+            else:
+               if stack[stackI]['mode']=='i': stack[stackI]['name']=int(stack[stackI]['name'])
+               stack[stackI]['obj']=stack[stackI]['obj'][stack[stackI]['name']]
+            stack[stackI]['name']=''
+            stack[stackI]['mode']=''
+      return stack[0]['obj']
+
+dispatcherBackendMap={
+   'parallelWithSocket':execBackend_parallelWithSocket
+}
+
 
 """REQUEST-RESPONSE SAMPLES
 --> {"jsonrpc": "2.0", "method": "subtract", "params": [42, 23], "id": 1}
