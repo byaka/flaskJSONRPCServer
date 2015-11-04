@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
 import sys, time, random
+sys.path.append('/var/python/libs/')
+sys.path.append('/var/python/')
+sys.path.append('/home/python/libs/')
+sys.path.append('/home/python/')
 
 import sexyPrime
 
@@ -15,15 +19,21 @@ def test1(_connection=None):
 
 def test2(_connection=None):
    # if we ran this before test1(), this wait while test1() completed
-   _connection.call.sleep(5)
+   _connection.call.sleep(2)
    print '>>before wait()'
    _connection.call.wait()
    print '>>after wait()'
    return 'test2'
 
 def test3(_connection=None):
+   # this will rise error, becouse this method not implemented yet
    _connection.server.reload()
    return 'test3'
+
+def test4(_connection=None):
+   _connection.call.sleep(5)
+   # time.sleep(5)
+   return 'ok'
 
 class mySharedMethods:
    def echo(self, data='Hello world', _connection=None):
@@ -77,10 +87,11 @@ if __name__=='__main__':
    # Register dispatcher for all methods of instance
    server.registerInstance(mySharedMethods(), path='/api')
    # Register dispatchers for single functions
-   server.registerFunction(stats, path='/api')
+   server.registerFunction(stats, path='/api', dispatcherBackend='simple')
    server.registerFunction(test1, path='/api')
    server.registerFunction(test2, path='/api')
    server.registerFunction(test3, path='/api')
+   server.registerFunction(test4, path='/api')
    # Run server
    server.serveForever()
    # Now you can access this api by path http://127.0.0.1:7001/api for JSON-RPC requests

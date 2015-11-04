@@ -24,8 +24,7 @@ __version__ = "%d.%d.%d%s" % (__ver_major__, __ver_minor__, __ver_patch__, __ver
    See the License for the specific language governing permissions and
    limitations under the License.
 """
-
-import sys, inspect, decimal, random, json, datetime, time, resource, os, zipfile, imp, urllib2, hashlib, httplib, urllib
+import sys, inspect, decimal, random, json, datetime, time, resource, os, zipfile, imp, urllib2, hashlib, httplib
 from types import InstanceType, IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, ModuleType, FunctionType
 Flask=None
 request=None
@@ -122,8 +121,8 @@ class flaskJSONRPCServer:
       except: self._throw('Unsupported JSONBackend %s'%jsonBackend)
       # select Notif-backend
       self.notifBackend={}
-      if notifBackend in ['threadPool', 'threadPoolReal']: #backend with non-blocking executing
-         self.notifBackend={'add':self._notifBackend_threadPool_add, 'init':self._notifBackend_threadPool_init, 'settings':magicDict({'poolSize':5, 'sleepTime_wait':0.02, 'forceReal':(notifBackend=='threadPoolReal')})}
+      if notifBackend in ['threadPool', 'threadPoolNative']: #backend with non-blocking executing
+         self.notifBackend={'add':self._notifBackend_threadPool_add, 'init':self._notifBackend_threadPool_init, 'settings':magicDict({'poolSize':5, 'sleepTime_wait':0.02, 'forceNative':(notifBackend=='threadPoolNative')})}
       elif notifBackend=='simple': #backend with blocking executing (like standart requests)
          self.notifBackend={'add':False}
       elif self._isDict(notifBackend): self.notifBackend=notifBackend
@@ -131,29 +130,43 @@ class flaskJSONRPCServer:
       else: self._throw('Unknow Notif-backend type: %s'%type(notifBackend))
       # select Dispatcher-backend
       self.dispatcherBackend={}
-      if dispatcherBackend in dispatcherBackendMap: #backend with non-blocking executing
-         self.dispatcherBackend=dispatcherBackendMap[dispatcherBackend]()
-      elif dispatcherBackend=='simple': #backend with blocking executing (like standart requests)
-         self.dispatcherBackend=magicDict({'add':False})
-      elif self._isDict(dispatcherBackend): self.dispatcherBackend=magicDict(dispatcherBackend)
-      elif self._isInstance(dispatcherBackend): self.dispatcherBackend=dispatcherBackend
-      else: self._throw('Unknow Dispatcher-backend type: %s'%type(dispatcherBackend))
+      self.defaultDispatcherBackendId=self._registerDispatcherBackend(dispatcherBackend=dispatcherBackend)
       # prepare speedStats
       self.speedStats={}
       self.speedStatsMax={}
       self.connPerMinute=magicDict({'nowMinute':0, 'count':0, 'oldCount':0, 'maxCount':0, 'minCount':0})
 
+   def _registerDispatcherBackend(self, dispatcherBackend):
+      _id=None
+      # get _id of backend and prepare
+      if dispatcherBackend in dispatcherBackendMap: #backend with non-blocking executing
+         dispatcherBackend=dispatcherBackendMap[dispatcherBackend]()
+         _id=getattr(dispatcherBackend, '_id', None)
+      elif dispatcherBackend=='simple': #backend with blocking executing (like standart requests)
+         _id='simple'
+         dispatcherBackend=None
+      elif self._isDict(dispatcherBackend):
+         _id=dispatcherBackend.get('_id', None)
+         dispatcherBackend=magicDict(dispatcherBackend)
+      elif self._isInstance(dispatcherBackend):
+         _id=getattr(dispatcherBackend, '_id', None)
+      else: self._throw('Unknow Dispatcher-backend type: %s'%type(dispatcherBackend))
+      if not _id: self._throw('No _id in Dispatcher-backend')
+      if dispatcherBackend and _id not in self.dispatcherBackend: # add execBackend to map if not exist
+         self.dispatcherBackend[_id]=dispatcherBackend
+      return _id
+
    def _getServerUrl(self):
       res=[str(s) for s in self.flaskApp.url_map.iter_rules()]
       return res
 
-   def _registerServerUrl(self, url):
+   def _registerServerUrl(self, urlMap, methods=['GET', 'OPTIONS', 'POST']):
       urlNow=self._getServerUrl()
-      for s, h in url.items():
+      for s, h in urlMap.items():
          if s in urlNow: continue
-         self.flaskApp.add_url_rule(rule=s, view_func=h, methods=['GET', 'OPTIONS', 'POST'], strict_slashes=False)
+         self.flaskApp.add_url_rule(rule=s, view_func=h, methods=methods, strict_slashes=False)
 
-   def _import(self, modules, scope=None, forceDelete=False):
+   def _import(self, modules, scope=None, forceDelete=True):
       """ replace existed imported module and monke_putch if needed """
       # if scope is None: scope=globals()
       #! Add checking with "monkey.is_module_patched()""
@@ -173,22 +186,22 @@ class flaskJSONRPCServer:
          if scope is not None: scope[k]=m
       return scope
 
-   def _importThreading(self, scope=None, forceDelete=False):
+   def _importThreading(self, scope=None, forceDelete=True):
       modules={
          'threading':None,
-         'thread':['patch_thread', {'threading':True}], #'_threading_local':True, 'Event':False'logging':True, 'existing_locks':True
+         'thread':['patch_thread', {'threading':True}], #'_threading_local':True, 'Event':False', logging':True, 'existing_locks':True
          'time':'patch_time'
       }
       return self._import(modules, scope=scope, forceDelete=forceDelete)
 
-   def _importSocket(self, scope=None, forceDelete=False):
+   def _importSocket(self, scope=None, forceDelete=True):
       modules={
          'socket':['patch_socket', {'dns':True, 'aggressive':True}],
          'ssl':'patch_ssl'
       }
       return self._import(modules, scope=scope, forceDelete=forceDelete)
 
-   def _importAll(self, scope=None, forceDelete=False):
+   def _importAll(self, scope=None, forceDelete=True):
       self._importThreading(scope=scope, forceDelete=forceDelete)
       self._importSocket(scope=scope, forceDelete=forceDelete)
 
@@ -314,9 +327,16 @@ class flaskJSONRPCServer:
          self._importThreading(forceDelete=True)
       time.sleep(s)
 
+   def _getScriptPath(self):
+      return os.path.dirname(os.path.realpath(sys.argv[0]))
+
+   def _getScriptName(self, withExt=False):
+      if withExt: return os.path.basename(sys.argv[0])
+      else: return os.path.splitext(os.path.basename(sys.argv[0]))[0]
+
    def _notifBackend_threadPool_init(self):
       if self.notifBackend.get('_cicleThread', None): return
-      if self.notifBackend['settings'].forceReal and self.setts.gevent:
+      if self.notifBackend['settings'].forceNative and self.setts.gevent:
          self._logger('Warning: notifBackend forced to use Native Threads')
       from collections import deque
       self.notifBackend['queue']=deque()
@@ -337,10 +357,10 @@ class flaskJSONRPCServer:
                self._sleep(self.notifBackend['settings'].sleepTime_wait)
             self.notifBackend['poolSize']+=1
             self._speedStatsAdd('notifBackend_wait', self._getms()-mytime)
-            isForceReal=self.notifBackend['settings'].forceReal and self.setts.gevent
-            self._thread(tFunc_processing, args=[tArr1, isForceReal], forceReal=isForceReal)
-      def tFunc_processing(p, threaded=False):
-         status, params, result=self._callDispatcher(p['path'], p['dataIn'], p['request'], threaded=threaded)
+            isForceNative=self.notifBackend['settings'].forceNative and self.setts.gevent
+            self._thread(tFunc_processing, args=[tArr1, isForceNative], forceNative=isForceNative)
+      def tFunc_processing(p, nativeThread=False):
+         status, params, result=self._callDispatcher(p['path'], p['dataIn'], p['request'], nativeThread=nativeThread or not self.setts.gevent)
          if not status:
             self._logger('ERROR in notifBackend._callDispatcher():', result)
             print '!!! ERROR_processing', result
@@ -356,8 +376,8 @@ class flaskJSONRPCServer:
          print '!!! ERROR _notifBackend_threadPool_add', e
          return None, str(e)
 
-   def _thread(self, target, args=None, kwargs=None, forceReal=False):
-      if forceReal: #force using NATIVE python threads, insted of coroutines
+   def _thread(self, target, args=None, kwargs=None, forceNative=False):
+      if forceNative: #force using NATIVE python threads, insted of coroutines
          import gevent
          t=gevent._threading.start_new_thread(target, tuple(args or []), kwargs or {})
       else:
@@ -395,7 +415,7 @@ class flaskJSONRPCServer:
          # self.speedStats[name]=[max(self.speedStats[name])]
          self.speedStats[name]=[self.speedStatsMax[name]]
 
-   def registerInstance(self, dispatcher, path='', fallback=None):
+   def registerInstance(self, dispatcher, path='', fallback=None, dispatcherBackend=None):
       """Create dispatcher for methods of given class's instance.
 
       *If methods has attribute _alias(List or String), it used as aliases of name.*
@@ -409,19 +429,21 @@ class flaskJSONRPCServer:
       path=path if path.startswith('/') else '/'+path
       path=path if path.endswith('/') else path+'/'
       if path not in self.routes: self.routes[path]={}
+      if dispatcherBackend is None: bckId=self.defaultDispatcherBackendId
+      else: bckId=self._registerDispatcherBackend(dispatcherBackend=dispatcherBackend)
       for name in dir(dispatcher):
          link=getattr(dispatcher, name)
          if self._isFunction(link):
-            self.routes[path][name]=magicDict({'allowJSONP':fallback, 'link':link})
+            self.routes[path][name]=magicDict({'allowJSONP':fallback, 'link':link, 'execBackendId':bckId})
             link.__func__._id={'path':path, 'name':name} #save path for dispatcher in routes
             # setattr(link, '_id', {'path':path, 'name':name}) #save path for dispatcher in routes
             if hasattr(link, '_alias'):
                tArr1=link._alias if self._isArray(link._alias) else [link._alias]
                for alias in tArr1:
                   if self._isString(alias):
-                     self.routes[path][alias]=magicDict({'allowJSONP':fallback, 'link':link})
+                     self.routes[path][alias]=magicDict({'allowJSONP':fallback, 'link':link, 'execBackendId':bckId})
 
-   def registerFunction(self, dispatcher, path='', fallback=None, name=None):
+   def registerFunction(self, dispatcher, path='', fallback=None, name=None, dispatcherBackend=None):
       """Create dispatcher for given function.
 
       *If methods has attribute _alias(List or String), it used as aliases of name.*
@@ -436,7 +458,9 @@ class flaskJSONRPCServer:
       path=path if path.startswith('/') else '/'+path
       path=path if path.endswith('/') else path+'/'
       if path not in self.routes: self.routes[path]={}
-      self.routes[path][name]=magicDict({'allowJSONP':fallback, 'link':dispatcher})
+      if dispatcherBackend is None: bckId=self.defaultDispatcherBackendId
+      else: bckId=self._registerDispatcherBackend(dispatcherBackend=dispatcherBackend)
+      self.routes[path][name]=magicDict({'allowJSONP':fallback, 'link':dispatcher, 'execBackendId':bckId})
       if hasattr(dispatcher, '__func__'):
          dispatcher.__func__._id={'path':path, 'name':name} #save path for dispatcher in routes
       else:
@@ -445,7 +469,7 @@ class flaskJSONRPCServer:
          tArr1=dispatcher._alias if self._isArray(dispatcher._alias) else [dispatcher._alias]
          for alias in tArr1:
             if self._isString(alias):
-               self.routes[path][alias]=magicDict({'allowJSONP':fallback, 'link':dispatcher})
+               self.routes[path][alias]=magicDict({'allowJSONP':fallback, 'link':dispatcher, 'execBackendId':bckId})
 
    def _parseJSON(self, data):
       mytime=self._getms()
@@ -631,10 +655,10 @@ class flaskJSONRPCServer:
          api.append({'dispatcher':dispatcher, 'path':path, 'isInstance':isInstance, 'name':name})
       self._thread(target=self._reload, kwargs={'api':api, 'clearOld':clearOld, 'timeout':timeout})
 
-   def _callDispatcher(self, path, data, request, isJSONP=False, threaded=None, overload=None):
+   def _callDispatcher(self, path, data, request, isJSONP=False, nativeThread=None, overload=None):
       try:
          self.processingDispatcherCount+=1
-         if not threaded:
+         if not nativeThread:
             sleepMethod=self._sleep
          else:
             #import native time.sleep() for native threads
@@ -663,7 +687,7 @@ class flaskJSONRPCServer:
                   'wait':lambda returnStatus=False: self.wait(dispatcher=dispatcher, sleepMethod=sleepMethod, returnStatus=returnStatus),
                   'sleep':sleepMethod,
                }),
-               'threaded':threaded,
+               'nativeThread':nativeThread if nativeThread is not None else not(self.setts.gevent),
                'notify':not('id' in data),
                'dispatcher':dispatcher,
                'path':path,
@@ -762,23 +786,27 @@ class flaskJSONRPCServer:
                elif dataIn['method'] not in self.routes[path]: #call of uncknown method
                   error.append({"code": -32601, "message": "Method not found", "id":dataIn['id']})
                else: #process correct request
+                  # generate unique id
+                  uniqueId='--'.join([dataIn['method'], str(dataIn['id']), str(random.randint(0, 999999)), str(random.randint(0, 999999)), str(request.environ.get('HTTP_X_REAL_IP', request.remote_addr) or ''), self._sha1(request.get_data()), str(self._getms())])
+                  # select dispatcher
+                  dispatcher=self.routes[path][dataIn['method']]
+                  # select backend for executing
                   if not dataIn['id']: #notification request
                      if self.notifBackend.get('add', None):
                         # copy request's context
                         r=self._copyRequestContext(request)
-                        s, m=self.notifBackend['add'](path, dataIn, r)
-                        if not s: error.append({"code": 500, "message": 'Error in notifBackend.add(): %s'%m})
+                        status, m=self.notifBackend['add'](path, dataIn, r)
+                        if not status: self._logger('Error in notifBackend.add(): %s'%m)
                      else:
                         status, params, result=self._callDispatcher(path, dataIn, request)
                   else: #simple request
-                     if hasattr(self.dispatcherBackend, 'add') and hasattr(self.dispatcherBackend, 'check'):
-                        # generate unique id
-                        uniqueId='--'.join([str(dataIn['id']), str(random.randint(10000, 999999)), str(request.environ.get('HTTP_X_REAL_IP', request.remote_addr) or ''), self._sha1(request.get_data()), str(self._getms())])
+                     execBackend=self.dispatcherBackend.get(dispatcher.execBackendId, None)
+                     if execBackend and hasattr(execBackend, 'add') and hasattr(execBackend, 'check'):
                         # copy request's context
                         r=self._copyRequestContext(request)
-                        s, m=self.dispatcherBackend.add(uniqueId, path, dataIn, r)
-                        if not s: error.append({"code": 500, "message": 'Error in dispatcherBackend.add(): %s'%m})
-                        status, params, result=self.dispatcherBackend.check(uniqueId)
+                        status, m=execBackend.add(uniqueId, path, dataIn, r)
+                        if not status: result='Error in dispatcherBackend.add(): %s'%m
+                        else: status, params, result=execBackend.check(uniqueId)
                      else:
                         status, params, result=self._callDispatcher(path, dataIn, request)
                      if status:
@@ -867,9 +895,10 @@ class flaskJSONRPCServer:
 
    def start(self, joinLoop=False):
       """ Start server's loop """
-      # start notifBackend
+      # start execBackends
       if self.notifBackend.get('init', None): self.notifBackend['init']()
-      if hasattr(self.dispatcherBackend, 'start'): self.dispatcherBackend.start(self)
+      for _id, bck in self.dispatcherBackend.items():
+         if hasattr(bck, 'start'): bck.start(self)
       # reset flask routing (it useful when somebody change self.flaskApp)
       self._registerServerUrl(dict([[s, self._requestHandler] for s in self.pathsDef]))
       if self.setts.gevent:
@@ -877,8 +906,7 @@ class flaskJSONRPCServer:
          try: import gevent
          except ImportError: self._throw('gevent backend not found')
          self._importAll()
-         from gevent import monkey
-         monkey.patch_all()
+         gevent.monkey.patch_all(sys=False, os=False, thread=False, time=False, ssl=False, socket=False) #! "os" may cause some problems with multiprocessing. but better get original objects in execBackend
          from gevent.pywsgi import WSGIServer
          from gevent.pool import Pool
          self._serverPool=Pool(None)
@@ -909,10 +937,10 @@ class flaskJSONRPCServer:
             import ssl
             sslContext=ssl.SSLContext(ssl.PROTOCOL_TLSv1_2) #SSL.Context(SSL.SSLv23_METHOD)
             sslContext.load_cert_chain(self.setts.ssl[1], self.setts.ssl[0])
-         self.flaskApp.add_url_rule(rule='/_werkzeugStop/', view_func=self._werkzeugStop, methods=['GET'])
+         self._registerServerUrl({'/_werkzeugStop/':self._werkzeugStop}, methods=['GET'])
+         # self.flaskApp.add_url_rule(rule='/_werkzeugStop/', view_func=self._werkzeugStop, methods=['GET'])
          self._server=self._thread(self.flaskApp.run, kwargs={'host':self.setts.ip, 'port':self.setts.port, 'ssl_context':sslContext, 'debug':self.setts.debug, 'threaded':not(self.setts.blocking)})
          if joinLoop: self._server.join()
-         # self.flaskApp.run(host=self.setts.ip, port=self.setts.port, ssl_context=sslContext, debug=self.setts.debug, threaded=not(self.setts.blocking))
 
    def _werkzeugStop(self):
       try:
@@ -1006,37 +1034,55 @@ class flaskJSONRPCServer:
    #    #       stunnelLog=self._fileGet(logPath)
    #    # thread_checkSSLTunnel=threading.Thread(target=checkSSLTunnel).start()
    #    return stunnel
-
 class execBackend_parallelWithSocket:
-   def __init__(self, poolSize=5, importGlobalsFromParent=True, parentGlobals={}, sleepTime_resultCheck=0.02, sleepTime_emptyQueue=0.2, sleepTime_waitLock=0.75):
+   def __init__(self, poolSize=2, importGlobalsFromParent=True, parentGlobals={}, sleepTime_resultCheck=0.02, sleepTime_emptyQueue=0.2, sleepTime_waitLock=0.75, sleepTime_lazyRequest=3*60*1000, allowThreads=False, id='execBackend_parallelWithSocket', socketPath=None):
       self.settings=magicDict({
          'poolSize':poolSize,
          'sleepTime_resultCheck':sleepTime_resultCheck,
          'sleepTime_emptyQueue':sleepTime_emptyQueue,
          'sleepTime_waitLock':sleepTime_waitLock,
-         'importGlobalsFromParent':importGlobalsFromParent
+         'sleepTime_lazyRequest':sleepTime_lazyRequest,
+         'importGlobalsFromParent':importGlobalsFromParent,
+         'allowThreads':allowThreads
       })
       from collections import deque
       self.parentGlobals=parentGlobals or {}
       self.queue=deque()
-      self.result={}
       self.pool=[]
       self._server=None
+      self._id=id
+      self.result={}
+      self.socketPath=socketPath
 
    def start(self, server):
       if self._server: return
-      # create api on unix-socket
-      server._importSocket()
-      listener=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-      socketPath=os.path.realpath(sys.argv[0])+'.sock'
-      if os.path.exists(socketPath): os.remove(socketPath)
-      listener.bind(socketPath)
-      listener.listen(1)
-      self._server=flaskJSONRPCServer([socketPath, listener], blocking=False, cors=False, gevent=server.setts.gevent, debug=False, log=False, fallback=False, allowCompress=False, jsonBackend='simplejson', tweakDescriptors=None)
-      self._parentServer=server
+      # generate socket-file
+      if not self.socketPath:
+         self.socketPath='%s/.%s.%s.sock'%(server._getScriptPath(), server._getScriptName(withExt=False), self._id)
+      if os.path.exists(self.socketPath): os.remove(self.socketPath)
+      # generate access token
+      self.token='--'.join([str(int(random.random()*999999)) for i in xrange(10)])
+      # start processesPool
+      """
+      if this block after starting new API, server has really strange problems with "doubled" variables and etc.
+      But if this code before "self._server.start()", all work fine.
+      I not understand why this happened and i spend more then two days for debugging.
+      """
+      import multiprocessing
+      for i in xrange(self.settings.poolSize): # multiprocessing.cpu_count()
+         p=multiprocessing.Process(target=self.childCicle, args=(server, ))
+         p.start()
+         self.pool.append(p)
       # import parent's globals if needed
       if self.settings.importGlobalsFromParent:
          server._importGlobalsFromParent(scope=self.parentGlobals)
+      # create api on unix-socket
+      self._parentServer=server
+      server._importAll(forceDelete=True) #IMPORTANT! without this child hangs on socket operations
+      listener=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+      listener.bind(self.socketPath)
+      listener.listen(1)
+      self._server=flaskJSONRPCServer([self.socketPath, listener], blocking=False, cors=False, gevent=server.setts.gevent, debug=False, log=False, fallback=False, allowCompress=False, jsonBackend='simplejson', tweakDescriptors=None, notifBackend='simple', dispatcherBackend='simple')
       self._server.registerFunction(self.api_queueGet, path='/queue', name='get')
       self._server.registerFunction(self.api_queueResult, path='/queue', name='result')
       self._server.registerFunction(self.api_parentCopyGlobals, path='/parent', name='copyGlobals')
@@ -1047,72 +1093,103 @@ class execBackend_parallelWithSocket:
       self._server.registerFunction(self.api_parentUnlock, path='/parent', name='unlock')
       self._server.registerFunction(self.api_parentSpeedStatsAdd, path='/parent', name='speedStatsAdd')
       self._server.start()
-      # generate access token
-      self.token='--'.join([str(int(random.random()*999999)) for i in xrange(10)])
-      # start processesPool
-      import multiprocessing
-      # multiprocessing.cpu_count()
-      for i in xrange(self.settings.poolSize):
-         p=multiprocessing.Process(target=self.childCicle, args=(server, socketPath))
-         p.start()
-         self.pool.append(p)
 
    def sendRequest(self, path, method, params=[]):
       mytime=self._server._getms()
-      data={'jsonrpc': '2.0', 'id': '0', 'method': method, 'params':params}
+      if self._server._isArray(method):
+         data=[{'jsonrpc': '2.0', 'method': v['method'], 'params':v['params']} for v in method]
+      else:
+         data={'jsonrpc': '2.0', 'id': int(random.random()*999999), 'method': method, 'params':params}
       try: data=self._server._serializeJSON(data) #IMPORTANT! _server, not _parentServer, or it will be cycled
       except Exception, e:
          self._parentServer._throw('Cant serialize JSON: %s'%(e))
-      self._conn.request('POST', path, data, {'Token':self.token})
-      resp=self._conn.getresponse()
+      _conn=self._conn if self._conn is not None else UnixHTTPConnection(self.socketPath)
+      for i in xrange(10):
+         try:
+            _conn.request('POST', path, data, {'Token':self.token})
+            if self._conn is not None: self._conn=_conn
+            break
+         except Exception: pass
+         self._parentServer._sleep(1)
+         _conn=UnixHTTPConnection(self.socketPath)
+      else: self._parentServer._throw('Cant connect to backend-API:'%self.socketPath)
+      resp=_conn.getresponse()
       data2=resp.read()
+      if self._server._isArray(method): return
       data2=self._server._parseJSON(data2) #IMPORTANT! _server, not _parentServer, or it will be cycled
       if method!='speedStatsAdd':
-         self.sendRequest('/parent', 'speedStatsAdd', ['execBackend_%s'%method, self._server._getms()-mytime])
+         self._parentServer._speedStatsAdd(method, self._server._getms()-mytime)
       if data2.get('error'):
          self._parentServer._throw('Error %s: %s'%(data2['error']['code'], data2['error']['message']))
       return data2.get('result', None)
 
-   def childCicle(self, parentServer, socketPath):
+   def childCicle(self, parentServer):
+      self._server=flaskJSONRPCServer(['', ''], gevent=parentServer.setts.gevent) #we need this dummy for some methods from it
       self._parentServer=parentServer
-      parentServer.setts.gevent=False
-      parentServer._importThreading(forceDelete=True)
-      parentServer._importSocket(forceDelete=True)
-      self._conn=UnixHTTPConnection(socketPath)
+      self._conn=None
+      self._lazyRequest={}
+      self._lazyRequestLatTime=None
+      if not self.settings.allowThreads: parentServer.setts.gevent=False
+      parentServer._importAll(forceDelete=True)
+      if not self.settings.allowThreads: #! in gevent we can't use same socket for read and write
+         self._conn=UnixHTTPConnection(self.socketPath)
       # overload some methods in parentServer
       parentServer.stats=lambda inMS=False: self.sendRequest('/parent', 'stats', [inMS])
       parentServer.lock=lambda dispatcher=None: self.sendRequest('/parent', 'lock', [(None if dispatcher is None else dispatcher._id)])
       parentServer.unlock=lambda dispatcher=None, exclusive=False: self.sendRequest('/parent', 'unlock', [(None if dispatcher is None else dispatcher._id), exclusive])
-      # parentServer.wait() is more complicated, becose it must check lock-status in parent, but suspend child
-      def childWait(dispatcher=None, sleepMethod=None, returnStatus=False):
-         sleepMethod=sleepMethod or parentServer._sleep
-         while self.sendRequest('/parent', 'wait', [(None if dispatcher is None else dispatcher._id)]):
-            if returnStatus: return True
-            sleepMethod(self.settings.sleepTime_waitLock)
-         if returnStatus: return False
-      parentServer.wait=childWait
-      parentServer._speedStatsAdd=lambda name, val: self.sendRequest('/parent', 'speedStatsAdd', [name, val])
-      # disable none-implemented methods in parentServer
-      whiteList=['_callDispatcher', '_checkFileDescriptor', '_compress', '_copyRequestContext', '_countFileDescriptor', '_fileGet', '_fileWrite', '_fixJSON', '_getErrorInfo', '_getms', '_import', '_importAll', '_importSocket', '_importThreading', '_isArray', '_isDict', '_isFunction', '_isInstance', '_isNum', '_isString', '_logger', '_parseJSON', '_serializeJSON', '_sha1', '_sha256', '_sleep', '_speedStatsAdd', '_strGet', '_thread', '_throw', '_tweakLimit', 'fixJSON', 'lock', 'stats', 'unlock', 'wait']
-      for name in dir(parentServer):
-         if not parentServer._isFunction(getattr(parentServer, name)): continue
-         if name not in whiteList:
-            s='Method "%s" not implemented in parallel backend'%(name)
-            setattr(parentServer, name, lambda *args, **kwargs: parentServer._throw(s))
-      # some overloads in _callDispatcher()._connection
-      def callDispatcheOverload(_connection):
-         _connection['call']['eval']=lambda code, scope=None: self.sendRequest('/parent', 'eval', [code, scope, False])
-         _connection['call']['execute']=lambda code, scope=None: self.sendRequest('/parent', 'eval', [code, scope, True])
-         _connection['call']['copyGlobals']=lambda what=None: self.sendRequest('/parent', 'copyGlobals', [what])
-         return _connection
+      parentServer.wait=self.childWait
+      def _speedStatsAdd(name, val):
+         if '/parent' not in self._lazyRequest: self._lazyRequest['/parent']=[]
+         self._lazyRequest['/parent'].append({'method':'speedStatsAdd', 'params':['execBackend_%s'%name, val]})
+      parentServer._speedStatsAdd=_speedStatsAdd
+      self.childDisableNotImplemented()
       # main cicle
       while True:
+         self.childSendLazyRequest()
          p=self.sendRequest('/queue', 'get')
          if p:
-            p['request']=magicDict(p['request']) # _callDispatcher() work with this like object, not dict
-            status, params, result=parentServer._callDispatcher(p['path'], p['dataIn'], p['request'], overload=callDispatcheOverload)
-            self.sendRequest('/queue', 'result', [p['uniqueId'], status, params, result])
+            if self.settings.allowThreads:
+               parentServer._thread(self.childExecute, args=[p])
+            else: self.childExecute(p)
+            continue
          parentServer._sleep(self.settings.sleepTime_emptyQueue)
+
+   def childSendLazyRequest(self):
+      if self._lazyRequestLatTime is None: self._lazyRequestLatTime=self._server._getms()
+      if self._server._getms()-self._lazyRequestLatTime<self.settings.sleepTime_lazyRequest: return
+      for path, v in self._lazyRequest.items():
+         del self._lazyRequest[path]
+         self.sendRequest(path, v)
+      self._lazyRequestLatTime=self._server._getms()
+
+   def childExecute(self, p):
+      p['request']=magicDict(p['request']) # _callDispatcher() work with this like object, not dict
+      status, params, result=self._parentServer._callDispatcher(p['path'], p['dataIn'], p['request'], overload=self.childConnectionOverload, nativeThread=self.settings.allowThreads and not(self._parentServer.setts.gevent))
+      self.sendRequest('/queue', 'result', [p['uniqueId'], status, params, result])
+
+   def childWait(self, dispatcher=None, sleepMethod=None, returnStatus=False):
+      # parentServer.wait() is more complicated, becose it must check lock-status in parent, but suspend child
+      sleepMethod=sleepMethod or self._parentServer._sleep
+      while self.sendRequest('/parent', 'wait', [(None if dispatcher is None else dispatcher._id)]):
+         if returnStatus: return True
+         sleepMethod(self.settings.sleepTime_waitLock)
+      if returnStatus: return False
+
+   def childConnectionOverload(self, _connection):
+      # some overloads in _callDispatcher()._connection
+      _connection['call']['eval']=lambda code, scope=None: self.sendRequest('/parent', 'eval', [code, scope, False])
+      _connection['call']['execute']=lambda code, scope=None: self.sendRequest('/parent', 'eval', [code, scope, True])
+      _connection['call']['copyGlobals']=lambda what=None: self.sendRequest('/parent', 'copyGlobals', [what])
+      return _connection
+
+   def childDisableNotImplemented(self):
+      # disable none-implemented methods in parentServer
+      whiteList=['_callDispatcher', '_checkFileDescriptor', '_compress', '_copyRequestContext', '_countFileDescriptor', '_fileGet', '_fileWrite', '_fixJSON', '_getErrorInfo', '_getms', '_import', '_importAll', '_importSocket', '_importThreading', '_isArray', '_isDict', '_isFunction', '_isInstance', '_isNum', '_isString', '_logger', '_parseJSON', '_serializeJSON', '_sha1', '_sha256', '_sleep', '_speedStatsAdd', '_strGet', '_thread', '_throw', '_tweakLimit', 'fixJSON', 'lock', 'stats', 'unlock', 'wait']
+      for name in dir(self._parentServer):
+         if not self._parentServer._isFunction(getattr(self._parentServer, name)): continue
+         if name not in whiteList:
+            s='Method "%s" not implemented in parallel backend'%(name)
+            setattr(self._parentServer, name, lambda *args, **kwargs: self._parentServer._throw(s))
 
    def api_queueGet(self, _connection=None):
       if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
@@ -1145,7 +1222,9 @@ class execBackend_parallelWithSocket:
          scope=scope if scope is None else self._server._parseJSON(scope)
          s=compile(code, '<string>', 'exec' if isExec else 'eval')
          res=eval(s, self.parentGlobals if scope is None else scope)
-      except Exception, e: self._server._throw('Cant executing code: %s'%(e))
+      except Exception, e:
+         print 'ERR', e, code
+         self._server._throw('Cant execute code: %s'%(e))
       return res
 
    def api_parentCopyGlobals(self, what=None, _connection=None):
@@ -1206,7 +1285,7 @@ class execBackend_parallelWithSocket:
 
    def check(self, uniqueId):
       mytime=self._parentServer._getms()
-      while not self.result.get(uniqueId, None):
+      while uniqueId not in self.result:
          self._parentServer._sleep(self.settings.sleepTime_resultCheck)
       self._parentServer._speedStatsAdd('execBackend_wait', self._parentServer._getms()-mytime)
       tArr=self.result[uniqueId]
