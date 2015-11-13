@@ -3,7 +3,7 @@
 __ver_major__ = 0
 __ver_minor__ = 5
 __ver_patch__ = 2
-__ver_sub__ = "1"
+__ver_sub__ = "with_parallel_executing"
 __version__ = "%d.%d.%d%s" % (__ver_major__, __ver_minor__, __ver_patch__, __ver_sub__)
 """
 :authors: Jhon Byaka
@@ -117,46 +117,40 @@ class flaskJSONRPCServer:
       self.jsonBackend=json
       if self._isString(jsonBackend):
          try: self.jsonBackend=__import__(jsonBackend)
-         except: self._logger('Cant import JSON-backend "%s", used standart'%jsonBackend)
+         except: self._logger('Cant import JSON-backend "%s", used standart'%(jsonBackend))
       elif jsonBackend: self.jsonBackend=jsonBackend
       # check JSON-backend
       try: self.jsonBackend.loads(self.jsonBackend.dumps([]))
-      except: self._throw('Unsupported JSONBackend %s'%jsonBackend)
-      # select Notif-backend
-      self.notifBackend={}
-      if notifBackend in ['threadPool', 'threadPoolNative']: #backend with non-blocking executing
-         self.notifBackend={'add':self._notifBackend_threadPool_add, 'init':self._notifBackend_threadPool_init, 'settings':magicDict({'poolSize':5, 'sleepTime_wait':0.02, 'forceNative':(notifBackend=='threadPoolNative')})}
-      elif notifBackend=='simple': #backend with blocking executing (like standart requests)
-         self.notifBackend={'add':False}
-      elif self._isDict(notifBackend): self.notifBackend=notifBackend
-      elif self._isFunction(notifBackend): self.notifBackend={'add':notifBackend}
-      else: self._throw('Unknow Notif-backend type: %s'%type(notifBackend))
+      except Exception, e: self._throw('Unsupported JSONBackend %s: %s'%(jsonBackend, e))
+      self.execBackend={}
       # select Dispatcher-backend
-      self.dispatcherBackend={}
-      self.defaultDispatcherBackendId=self._registerDispatcherBackend(dispatcherBackend=dispatcherBackend)
+      self.defaultDispatcherBackendId=self._registerExecBackend(dispatcherBackend, notif=False)
+      # select Notif-backend
+      self.defaultNotifBackendId=self._registerExecBackend(notifBackend, notif=True)
       # prepare speedStats
       self.speedStats={}
       self.speedStatsMax={}
       self.connPerMinute=magicDict({'nowMinute':0, 'count':0, 'oldCount':0, 'maxCount':0, 'minCount':0})
 
-   def _registerDispatcherBackend(self, dispatcherBackend):
+   def _registerExecBackend(self, execBackend, notif):
       _id=None
       # get _id of backend and prepare
-      if dispatcherBackend in dispatcherBackendMap: #backend with non-blocking executing
-         dispatcherBackend=dispatcherBackendMap[dispatcherBackend]()
-         _id=getattr(dispatcherBackend, '_id', None)
-      elif dispatcherBackend=='simple': #backend with blocking executing (like standart requests)
+      if execBackend in execBackendMap: #backend with non-blocking executing
+         execBackend=execBackendMap[execBackend](notif)
+         _id=getattr(execBackend, '_id', None)
+      elif execBackend=='simple': #backend with blocking executing (like standart requests)
          _id='simple'
-         dispatcherBackend=None
-      elif self._isDict(dispatcherBackend):
-         _id=dispatcherBackend.get('_id', None)
-         dispatcherBackend=magicDict(dispatcherBackend)
-      elif self._isInstance(dispatcherBackend):
-         _id=getattr(dispatcherBackend, '_id', None)
-      else: self._throw('Unknow Dispatcher-backend type: %s'%type(dispatcherBackend))
-      if not _id: self._throw('No _id in Dispatcher-backend')
-      if dispatcherBackend and _id not in self.dispatcherBackend: # add execBackend to map if not exist
-         self.dispatcherBackend[_id]=dispatcherBackend
+         execBackend=None
+      elif self._isDict(execBackend):
+         _id=execBackend.get('_id', None)
+         execBackend=magicDict(execBackend)
+      elif self._isInstance(execBackend):
+         _id=getattr(execBackend, '_id', None)
+      else: self._throw('Unknow Exec-backend type: %s'%type(execBackend))
+      # try to add execBackend
+      if not _id: self._throw('No _id in Exec-backend')
+      if execBackend and _id not in self.execBackend: # add execBackend to map if not exist
+         self.execBackend[_id]=execBackend
       return _id
 
    def _getServerUrl(self):
@@ -337,48 +331,6 @@ class flaskJSONRPCServer:
       if withExt: return os.path.basename(sys.argv[0])
       else: return os.path.splitext(os.path.basename(sys.argv[0]))[0]
 
-   def _notifBackend_threadPool_init(self):
-      if self.notifBackend.get('_cicleThread', None): return
-      if self.notifBackend['settings'].forceNative and self.setts.gevent:
-         self._logger('Warning: notifBackend forced to use Native Threads')
-      from collections import deque
-      self.notifBackend['queue']=deque()
-      self.notifBackend['poolSize']=0
-      #main cicle for processing notifs. Run or strating server
-      def tFunc_cicle():
-         while True:
-            self._deepWait()
-            self._sleep(self.notifBackend['settings'].sleepTime_wait)
-            try: tArr1=self.notifBackend['queue'].popleft()
-            except Exception, e:
-               if len(self.notifBackend['queue']):
-                  self._logger('ERROR in notifBackend.queue.pop():', e)
-               self._sleep(1)
-               continue
-            mytime=self._getms()
-            while self.notifBackend['poolSize']>=self.notifBackend['settings'].poolSize:
-               self._sleep(self.notifBackend['settings'].sleepTime_wait)
-            self.notifBackend['poolSize']+=1
-            self._speedStatsAdd('notifBackend_wait', self._getms()-mytime)
-            isForceNative=self.notifBackend['settings'].forceNative and self.setts.gevent
-            self._thread(tFunc_processing, args=[tArr1, isForceNative], forceNative=isForceNative)
-      def tFunc_processing(p, nativeThread=False):
-         status, params, result=self._callDispatcher(p['path'], p['dataIn'], p['request'], nativeThread=nativeThread or not self.setts.gevent)
-         if not status:
-            self._logger('ERROR in notifBackend._callDispatcher():', result)
-            print '!!! ERROR_processing', result
-         self.notifBackend['poolSize']-=1
-      self.notifBackend['_cicleThread']=self._thread(tFunc_cicle)
-
-   def _notifBackend_threadPool_add(self, path, dataIn, request):
-      #callback for adding notif to queue
-      try:
-         self.notifBackend['queue'].append({'path':path, 'dataIn':dataIn, 'request':request, 'mytime':self._getms()})
-         return True, len(self.notifBackend['queue'])
-      except Exception, e:
-         print '!!! ERROR _notifBackend_threadPool_add', e
-         return None, str(e)
-
    def _thread(self, target, args=None, kwargs=None, forceNative=False):
       if forceNative: #force using NATIVE python threads, insted of coroutines
          import gevent
@@ -418,7 +370,7 @@ class flaskJSONRPCServer:
          # self.speedStats[name]=[max(self.speedStats[name])]
          self.speedStats[name]=[self.speedStatsMax[name]]
 
-   def registerInstance(self, dispatcher, path='', fallback=None, dispatcherBackend=None):
+   def registerInstance(self, dispatcher, path='', fallback=None, dispatcherBackend=None, notifBackend=None):
       """Create dispatcher for methods of given class's instance.
 
       *If methods has attribute _alias(List or String), it used as aliases of name.*
@@ -432,21 +384,25 @@ class flaskJSONRPCServer:
       path=path if path.startswith('/') else '/'+path
       path=path if path.endswith('/') else path+'/'
       if path not in self.routes: self.routes[path]={}
-      if dispatcherBackend is None: bckId=self.defaultDispatcherBackendId
-      else: bckId=self._registerDispatcherBackend(dispatcherBackend=dispatcherBackend)
+      # select Dispatcher-backend
+      if dispatcherBackend is None: dBckId=self.defaultDispatcherBackendId
+      else: dBckId=self._registerExecBackend(dispatcherBackend, notif=False)
+      # select Notif-backend
+      if notifBackend is None: nBckId=self.defaultNotifBackendId
+      else: nBckId=self._registerExecBackend(notifBackend, notif=True)
+      # add dispatcher to routes
       for name in dir(dispatcher):
          link=getattr(dispatcher, name)
          if self._isFunction(link):
-            self.routes[path][name]=magicDict({'allowJSONP':fallback, 'link':link, 'execBackendId':bckId})
+            self.routes[path][name]=magicDict({'allowJSONP':fallback, 'link':link, 'dispatcherBackendId':dBckId, 'notifBackendId':nBckId})
             link.__func__._id={'path':path, 'name':name} #save path for dispatcher in routes
-            # setattr(link, '_id', {'path':path, 'name':name}) #save path for dispatcher in routes
             if hasattr(link, '_alias'):
                tArr1=link._alias if self._isArray(link._alias) else [link._alias]
                for alias in tArr1:
                   if self._isString(alias):
-                     self.routes[path][alias]=magicDict({'allowJSONP':fallback, 'link':link, 'execBackendId':bckId})
+                     self.routes[path][alias]=magicDict({'allowJSONP':fallback, 'link':link, 'dispatcherBackendId':dBckId, 'notifBackendId':nBckId})
 
-   def registerFunction(self, dispatcher, path='', fallback=None, name=None, dispatcherBackend=None):
+   def registerFunction(self, dispatcher, path='', fallback=None, name=None, dispatcherBackend=None, notifBackend=None):
       """Create dispatcher for given function.
 
       *If methods has attribute _alias(List or String), it used as aliases of name.*
@@ -461,9 +417,14 @@ class flaskJSONRPCServer:
       path=path if path.startswith('/') else '/'+path
       path=path if path.endswith('/') else path+'/'
       if path not in self.routes: self.routes[path]={}
-      if dispatcherBackend is None: bckId=self.defaultDispatcherBackendId
-      else: bckId=self._registerDispatcherBackend(dispatcherBackend=dispatcherBackend)
-      self.routes[path][name]=magicDict({'allowJSONP':fallback, 'link':dispatcher, 'execBackendId':bckId})
+      # select Dispatcher-backend
+      if dispatcherBackend is None: dBckId=self.defaultDispatcherBackendId
+      else: dBckId=self._registerExecBackend(dispatcherBackend, notif=False)
+      # select Notif-backend
+      if notifBackend is None: nBckId=self.defaultNotifBackendId
+      else: nBckId=self._registerExecBackend(notifBackend, notif=True)
+      # add dispatcher to routes
+      self.routes[path][name]=magicDict({'allowJSONP':fallback, 'link':dispatcher, 'dispatcherBackendId':dBckId, 'notifBackendId':nBckId})
       if hasattr(dispatcher, '__func__'):
          dispatcher.__func__._id={'path':path, 'name':name} #save path for dispatcher in routes
       else:
@@ -472,7 +433,7 @@ class flaskJSONRPCServer:
          tArr1=dispatcher._alias if self._isArray(dispatcher._alias) else [dispatcher._alias]
          for alias in tArr1:
             if self._isString(alias):
-               self.routes[path][alias]=magicDict({'allowJSONP':fallback, 'link':dispatcher, 'execBackendId':bckId})
+               self.routes[path][alias]=magicDict({'allowJSONP':fallback, 'link':dispatcher, 'dispatcherBackendId':dBckId, 'notifBackendId':nBckId})
 
    def _parseJSON(self, data):
       mytime=self._getms()
@@ -527,14 +488,14 @@ class flaskJSONRPCServer:
 
    def stats(self, inMS=False):
       res={'connPerSec_now':round(self.connPerMinute.count/60.0, 2), 'connPerSec_old':round(self.connPerMinute.oldCount/60.0, 2), 'connPerSec_max':round(self.connPerMinute.maxCount/60.0, 2), 'speedStats':{}, 'processingRequestCount':self.processingRequestCount, 'processingDispatcherCount':self.processingDispatcherCount}
-      #calculate spped stats
+      #calculate speed stats
       for k, v in self.speedStats.items():
          v1=max(v)
          v2=sum(v)/float(len(v))
          res['speedStats'][k+'_max']=round(v1/1000.0, 1) if not inMS else round(v1, 1)
          res['speedStats'][k+'_average']=round(v2/1000.0, 1) if not inMS else round(v2, 1)
       #get backend's stats
-      for _id, backend in self.dispatcherBackend.items():
+      for _id, backend in self.execBackend.items():
          if hasattr(backend, 'stats'): r=backend.stats(inMS=inMS)
          elif 'stats' in backend: r=backend['stats'](inMS=inMS)
          else: continue
@@ -808,19 +769,18 @@ class flaskJSONRPCServer:
                   dispatcher=self.routes[path][dataIn['method']]
                   # select backend for executing
                   if not dataIn['id']: #notification request
-                     if self.notifBackend.get('add', None):
+                     execBackend=self.execBackend.get(dispatcher.notifBackendId, None)
+                     if hasattr(execBackend, 'add'):
                         # copy request's context
-                        r=self._copyRequestContext(request)
-                        status, m=self.notifBackend['add'](path, dataIn, r)
+                        status, m=execBackend.add(uniqueId, path, dataIn, self._copyRequestContext(request))
                         if not status: self._logger('Error in notifBackend.add(): %s'%m)
                      else:
                         status, params, result=self._callDispatcher(path, dataIn, request)
                   else: #simple request
-                     execBackend=self.dispatcherBackend.get(dispatcher.execBackendId, None)
+                     execBackend=self.execBackend.get(dispatcher.dispatcherBackendId, None)
                      if execBackend and hasattr(execBackend, 'add') and hasattr(execBackend, 'check'):
                         # copy request's context
-                        r=self._copyRequestContext(request)
-                        status, m=execBackend.add(uniqueId, path, dataIn, r)
+                        status, m=execBackend.add(uniqueId, path, dataIn, self._copyRequestContext(request))
                         if not status: result='Error in dispatcherBackend.add(): %s'%m
                         else: status, params, result=execBackend.check(uniqueId)
                      else:
@@ -866,16 +826,14 @@ class flaskJSONRPCServer:
             # select dispatcher
             dispatcher=self.routes[path][dataIn['method']]
             # select backend for executing
-            execBackend=self.dispatcherBackend.get(dispatcher.execBackendId, None)
+            execBackend=self.execBackend.get(dispatcher.dispatcherBackendId, None)
             if execBackend and hasattr(execBackend, 'add') and hasattr(execBackend, 'check'):
                # copy request's context
-               r=self._copyRequestContext(request)
-               status, m=execBackend.add(uniqueId, path, dataIn, r, isJSONP=jsonpCB)
+               status, m=execBackend.add(uniqueId, path, dataIn, self._copyRequestContext(request), isJSONP=jsonpCB)
                if not status: result='Error in dispatcherBackend.add(): %s'%m
                else: status, params, result=execBackend.check(uniqueId)
             else:
                status, params, result=self._callDispatcher(path, dataIn, request, isJSONP=jsonpCB)
-            # status, params, result=self._callDispatcher(path, dataIn, request, isJSONP=jsonpCB)
             if status:
                if '_connection' in params: #get additional headers and cookies
                   outHeaders.update(params['_connection'].headersOut)
@@ -926,8 +884,7 @@ class flaskJSONRPCServer:
    def start(self, joinLoop=False):
       """ Start server's loop """
       # start execBackends
-      if self.notifBackend.get('init', None): self.notifBackend['init']()
-      for _id, bck in self.dispatcherBackend.items():
+      for _id, bck in self.execBackend.items():
          if hasattr(bck, 'start'): bck.start(self)
       # reset flask routing (it useful when somebody change self.flaskApp)
       self._registerServerUrl(dict([[s, self._requestHandler] for s in self.pathsDef]))
@@ -1065,8 +1022,69 @@ class flaskJSONRPCServer:
    #    # thread_checkSSLTunnel=threading.Thread(target=checkSSLTunnel).start()
    #    return stunnel
 
-class execBackend_parallelWithSocket:
-   def __init__(self, poolSize=1, importGlobalsFromParent=True, parentGlobals={}, sleepTime_resultCheck=0.1, sleepTime_emptyQueue=0.2, sleepTime_waitLock=0.75, sleepTime_lazyRequest=1*60*1000, allowThreads=False, id='execBackend_parallelWithSocket', socketPath=None):
+class execBackend_threaded(object):
+   def __init__(self, poolSize=5, sleepTime_emptyQueue=0.02, sleepTime_cicleWait=0.02, id='execBackend_threaded', forceNative=False):
+      self.settings=magicDict({
+         'poolSize':poolSize,
+         'sleepTime_emptyQueue':sleepTime_emptyQueue,
+         'sleepTime_cicleWait':sleepTime_cicleWait,
+         'forceNative':forceNative
+      })
+      from collections import deque
+      self.queue=deque()
+      self._poolSize=0
+      self._id=id
+      if forceNative: self._id+='Native'
+      self._mainCicleThread=None
+
+   def start(self, server):
+      if self._mainCicleThread: return
+      if self.settings.forceNative and server.setts.gevent:
+         server._logger('Warning: notifBackend forced to use Native Threads')
+      self._parentServer=server
+      self._mainCicleThread=server._thread(self.mainCicle)
+
+   def mainCicle(self):
+      #main cicle for processing notifs. Run on strating backend
+      while True:
+         self._parentServer._deepWait()
+         self._parentServer._sleep(self.settings.sleepTime_cicleWait)
+         if not len(self.queue): continue
+         tArr1=self.queue.popleft()
+         mytime=self._parentServer._getms()
+         while self._poolSize>=self.settings.poolSize:
+            self._parentServer._sleep(self.settings.sleepTime_emptyQueue)
+         self._poolSize+=1
+         self._parentServer._speedStatsAdd('notifBackend_wait', self._parentServer._getms()-mytime)
+         isForceNative=self.settings.forceNative and self._parentServer.setts.gevent
+         self._parentServer._thread(self.childExecute, args=[tArr1, isForceNative or not(self._parentServer.setts.gevent)], forceNative=isForceNative)
+
+   def childExecute(self, p, nativeThread=False):
+      print '>> exec in', self._id
+      status, params, result=self._parentServer._callDispatcher(p['path'], p['dataIn'], p['request'], nativeThread=nativeThread, isJSONP=p.get('isJSONP', False))
+      if not status:
+         self._parentServer._logger('ERROR in notifBackend._callDispatcher():', result)
+         print '!!! ERROR_processing', result
+      self._poolSize-=1
+
+   def add(self, uniqueId, path, dataIn, request, isJSONP=False):
+      #callback for adding notif to queue
+      try:
+         self.queue.append({'uniqueId':uniqueId, 'isJSONP':isJSONP, 'path':path, 'dataIn':dataIn, 'request':request, 'mytime':self._parentServer._getms()})
+         return True, len(self.queue)
+      except Exception, e:
+         print '!!! ERROR _notifBackend_threadPool_add', e
+         return None, str(e)
+
+   def stats(self, inMS=False):
+      r={
+         '%s_queue'%self._id:len(self.queue)
+      }
+      return r
+
+
+class execBackend_parallelWithSocket(object):
+   def __init__(self, poolSize=1, importGlobalsFromParent=True, parentGlobals=None, sleepTime_resultCheck=0.1, sleepTime_emptyQueue=0.2, sleepTime_waitLock=0.75, sleepTime_lazyRequest=1*60*1000, allowThreads=False, id='execBackend_parallelWithSocket', socketPath=None, saveResult=True):
       self.settings=magicDict({
          'poolSize':poolSize,
          'sleepTime_resultCheck':sleepTime_resultCheck,
@@ -1075,7 +1093,8 @@ class execBackend_parallelWithSocket:
          'sleepTime_lazyRequest':sleepTime_lazyRequest,
          'importGlobalsFromParent':importGlobalsFromParent,
          'allowThreads':allowThreads,
-         'lazyRequestChunk':1000
+         'lazyRequestChunk':1000,
+         'saveResult':saveResult
       })
       from collections import deque
       self.parentGlobals=parentGlobals or {}
@@ -1083,6 +1102,7 @@ class execBackend_parallelWithSocket:
       self._pool=[]
       self._server=None
       self._id=id
+      if not saveResult: self._id+='NoResult'
       self.result={}
       self.socketPath=socketPath
 
@@ -1200,8 +1220,10 @@ class execBackend_parallelWithSocket:
       self._lazyRequestLatTime=self._server._getms()
 
    def childExecute(self, p):
+      print '>> exec in', self._id
       p['request']=magicDict(p['request']) # _callDispatcher() work with this like object, not dict
       status, params, result=self._parentServer._callDispatcher(p['path'], p['dataIn'], p['request'], overload=self.childConnectionOverload, nativeThread=self.settings.allowThreads and not(self._parentServer.setts.gevent), isJSONP=p.get('isJSONP', False))
+      if not self.settings.saveResult: return
       self.sendRequest('/queue', 'result', [p['uniqueId'], status, params, result])
 
    def childWait(self, dispatcher=None, sleepMethod=None, returnStatus=False):
@@ -1245,6 +1267,7 @@ class execBackend_parallelWithSocket:
       if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
          self._parentServer._throw('Access denied') # tokens not match
       # set task's result
+      if not self.settings.saveResult: return
       if params and '_connection' in params: # _requestHandler() work with this like object, not dict
          params['_connection']=magicDict(params['_connection'])
       self.result[uniqueId]=[status, params, result]
@@ -1325,6 +1348,7 @@ class execBackend_parallelWithSocket:
          return None, str(e)
 
    def check(self, uniqueId):
+      if not self.settings.saveResult: return None, None, 'saveResult==False'
       mytime=self._parentServer._getms()
       while uniqueId not in self.result:
          self._parentServer._sleep(self.settings.sleepTime_resultCheck)
@@ -1341,10 +1365,14 @@ class execBackend_parallelWithSocket:
       return r
 
 # declaring map of exec-backends
-dispatcherBackendMap={
-   'parallelWithSocket':execBackend_parallelWithSocket
+execBackendMap={
+   'parallelWithSocket':lambda notif: execBackend_parallelWithSocket(saveResult=not(notif)),
+   'threaded':lambda notif: execBackend_threaded(),
+   'threadedNative':lambda notif: execBackend_threaded(forceNative=True)
 }
-
+# backward compatible
+execBackendMap['threadPool']=execBackendMap['threaded']
+execBackendMap['threadPoolNative']=execBackendMap['threadedNative']
 
 """REQUEST-RESPONSE SAMPLES
 --> {"jsonrpc": "2.0", "method": "subtract", "params": [42, 23], "id": 1}
