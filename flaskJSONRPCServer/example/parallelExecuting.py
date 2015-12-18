@@ -1,14 +1,30 @@
 # -*- coding: utf-8 -*-
 import sys, time, random
-sys.path.append('/var/python/libs/')
-sys.path.append('/var/python/')
-sys.path.append('/home/python/libs/')
-sys.path.append('/home/python/')
 
 import sexyPrime
 
 from flaskJSONRPCServer import flaskJSONRPCServer
+
 sexy_speedStats={}
+
+testVar=1
+testFunc=lambda s: '__%s__'%s
+
+def testScope(_connection=None):
+   # original "testVar"
+   print '"testVar" in global scope:', _connection.call.eval('testFunc(testVar)')
+
+   # overloaded "testVar"
+   print '"testVar" in passed scope:', _connection.call.eval('testVar', scope={'testVar':2}) # we can't call testFunc() here, it's not defined
+
+   # overloaded "testVar" but with original globals()
+   print '"testVar" in merged scope:', _connection.call.eval('testFunc(testVar)', scope=['_globals', {'testVar':2}])
+
+   # overloaded "testVar" but then over-overloaded with original globals()
+   print '"testVar" in wrong-merged scope:', _connection.call.eval('testFunc(testVar)', scope=[{'testVar':2}, '_globals'])
+
+   # overloaded "testVar" and imported testFunc() from globals()
+   print '"testVar" in passed scope with imported:', _connection.call.eval('testFunc(testVar)', scope=[{'testVar':2}, 'testFunc'])
 
 def test1(_connection=None):
    _connection.server.lock()
@@ -44,50 +60,31 @@ def sexyNum(n=None, _connection=None):
    mytime=_connection.server._getms()
    tArr=sexyPrime.sexy_primes(n)
    mytime=round((_connection.server._getms()-mytime)/1000.0, 1)
-   # if n not in sexy_speedStats: sexy_speedStats[n]=[]
-   # sexy_speedStats[n].append(mytime)
-   _connection.call.execute('if %(n)s not in sexy_speedStats: sexy_speedStats[%(n)s]=[]\nsexy_speedStats[%(n)s].append(%(t)s)'%({'n':n, 't':mytime}))
+   if _connection.get('parallelType', False):
+      _connection.call.execute('if %(n)s not in sexy_speedStats: sexy_speedStats[%(n)s]=[]\nsexy_speedStats[%(n)s].append(%(t)s)'%({'n':n, 't':mytime}))
+   else:
+      if n not in sexy_speedStats: sexy_speedStats[n]=[]
+      sexy_speedStats[n].append(mytime)
    # find nearest settings
    near=[]
-   # if len(sexy_speedStats[n])>1: near=['same', n]
-   if _connection.call.eval('len(sexy_speedStats[%s])'%n)>1: near=['same', n]
+   if _connection.get('parallelType', False):
+      if _connection.call.eval('len(sexy_speedStats[%s])'%n)>1: near=['same', n]
    else:
-      # tArr1=sorted([s for s in sexy_speedStats.keys() if s!=n])
-      tArr1=_connection.call.eval('sorted([s for s in sexy_speedStats.keys() if s!=%s])'%n)
+      if len(sexy_speedStats[n])>1: near=['same', n]
+   if not len(near):
+      if _connection.get('parallelType', False):
+         tArr1=_connection.call.eval('sorted([s for s in sexy_speedStats.keys() if s!=%s])'%n)
+      else:
+         tArr1=sorted([s for s in sexy_speedStats.keys() if s!=n])
       for i, s in enumerate(tArr1):
          if i<len(tArr1)-1 and s<n and tArr1[i+1]>n:
             near=['nearest', s if(n-s<n-tArr1[i+1]) else tArr1[i+1]]
             break
    if len(near):
-      # s=round(sum(sexy_speedStats[near[1]])/len(sexy_speedStats[near[1]]), 1)
-      s=_connection.call.eval('round(sum(sexy_speedStats[%(s)s])/len(sexy_speedStats[%(s)s]), 1)'%({'s':near[1]}))
-      near='For %s settings average speed %s seconds'%(near[0], s)
-   else: near='No nearest results'
-   return 'For %s numbers finded %s pairs in %s seconds. %s'%(n, len(tArr), mytime, near)
-
-def sexyNum2(n=None, _connection=None):
-   # for simple backend
-   if n is None: n=random.randint(25000, 35000)
-   mytime=_connection.server._getms()
-   tArr=sexyPrime.sexy_primes(n)
-   mytime=round((_connection.server._getms()-mytime)/1000.0, 1)
-   if n not in sexy_speedStats: sexy_speedStats[n]=[]
-   sexy_speedStats[n].append(mytime)
-   # _connection.call.execute('if %(n)s not in sexy_speedStats: sexy_speedStats[%(n)s]=[]\nsexy_speedStats[%(n)s].append(%(t)s)'%({'n':n, 't':mytime}))
-   # find nearest settings
-   near=[]
-   if len(sexy_speedStats[n])>1: near=['same', n]
-   # if _connection.call.eval('len(sexy_speedStats[%s])'%n)>1: near=['same', n]
-   else:
-      tArr1=sorted([s for s in sexy_speedStats.keys() if s!=n])
-      # tArr1=_connection.call.eval('sorted([s for s in sexy_speedStats.keys() if s!=%s])'%n)
-      for i, s in enumerate(tArr1):
-         if i<len(tArr1)-1 and s<n and tArr1[i+1]>n:
-            near=['nearest', s if(n-s<n-tArr1[i+1]) else tArr1[i+1]]
-            break
-   if len(near):
-      s=round(sum(sexy_speedStats[near[1]])/len(sexy_speedStats[near[1]]), 1)
-      # s=_connection.call.eval('round(sum(sexy_speedStats[%(s)s])/len(sexy_speedStats[%(s)s]), 1)'%({'s':near[1]}))
+      if _connection.get('parallelType', False):
+         s=_connection.call.eval('round(sum(sexy_speedStats[%(s)s])/len(sexy_speedStats[%(s)s]), 1)'%({'s':near[1]}))
+      else:
+         s=round(sum(sexy_speedStats[near[1]])/len(sexy_speedStats[near[1]]), 1)
       near='For %s settings average speed %s seconds'%(near[0], s)
    else: near='No nearest results'
    return 'For %s numbers finded %s pairs in %s seconds. %s'%(n, len(tArr), mytime, near)
@@ -117,9 +114,10 @@ if __name__=='__main__':
    server.registerFunction(test2, path='/api')
    server.registerFunction(test3, path='/api')
    server.registerFunction(test4, path='/api')
+   server.registerFunction(testScope, path='/api')
    server.registerFunction(echo, path='/api')
    server.registerFunction(sexyNum, path='/api')
-   server.registerFunction(sexyNum2, path='/api', dispatcherBackend='simple')
+   server.registerFunction(sexyNum, path='/api', dispatcherBackend='simple', name='sexyNum2')
 
    # Run server
    server.serveForever()
