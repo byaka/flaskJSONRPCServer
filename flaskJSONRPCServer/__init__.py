@@ -135,8 +135,10 @@ class flaskJSONRPCServer:
       self.connPerMinute=magicDict({'nowMinute':0, 'count':0, 'oldCount':0, 'maxCount':0, 'minCount':0})
 
    def _registerExecBackend(self, execBackend, notif):
-      _id=None
+      # check if execBackend._id passed. If true, not needed to initialize it
+      if execBackend in self.execBackend: return execBackend
       # get _id of backend and prepare
+      _id=None
       if execBackend in execBackendMap: #backend with non-blocking executing
          execBackend=execBackendMap[execBackend](notif)
          _id=getattr(execBackend, '_id', None)
@@ -326,8 +328,11 @@ class flaskJSONRPCServer:
          self._importThreading(forceDelete=True)
       time.sleep(s)
 
-   def _getScriptPath(self):
-      return os.path.dirname(os.path.realpath(sys.argv[0]))
+   def _getScriptPath(self, full=False):
+      if full:
+         return os.path.realpath(sys.argv[0])
+      else:
+         return os.path.dirname(os.path.realpath(sys.argv[0]))
 
    def _getScriptName(self, withExt=False):
       if withExt: return os.path.basename(sys.argv[0])
@@ -381,9 +386,7 @@ class flaskJSONRPCServer:
       """
       if not self._isInstance(dispatcher): self._throw('Bad dispatcher type: %s'%type(dispatcher))
       fallback=self.setts.fallback_JSONP if fallback is None else fallback
-      path=path or '/'
-      path=path if path.startswith('/') else '/'+path
-      path=path if path.endswith('/') else path+'/'
+      path=self._formatPath(path)
       if path not in self.routes: self.routes[path]={}
       # select Dispatcher-backend
       if dispatcherBackend is None: dBckId=self.defaultDispatcherBackendId
@@ -414,9 +417,7 @@ class flaskJSONRPCServer:
       if not self._isFunction(dispatcher): self._throw('Bad dispatcher type: %s'%type(dispatcher))
       fallback=self.setts.fallback_JSONP if fallback is None else fallback
       name=name or dispatcher.__name__
-      path=path or '/'
-      path=path if path.startswith('/') else '/'+path
-      path=path if path.endswith('/') else path+'/'
+      path=self._formatPath(path)
       if path not in self.routes: self.routes[path]={}
       # select Dispatcher-backend
       if dispatcherBackend is None: dBckId=self.defaultDispatcherBackendId
@@ -435,6 +436,12 @@ class flaskJSONRPCServer:
          for alias in tArr1:
             if self._isString(alias):
                self.routes[path][alias]=magicDict({'allowJSONP':fallback, 'link':dispatcher, 'dispatcherBackendId':dBckId, 'notifBackendId':nBckId})
+
+   def _formatPath(self, path=''):
+      path=path or '/'
+      path=path if path.startswith('/') else '/'+path
+      path=path if path.endswith('/') else path+'/'
+      return path
 
    def _parseJSON(self, data):
       mytime=self._getms()
@@ -560,36 +567,46 @@ class flaskJSONRPCServer:
    def _deepWait(self):
       while self.deepLocked: self._sleep(self.setts.sleepTime_waitDeepLock)
 
-   def _reload(self, api, clearOld=False, timeout=60):
+   def _reload(self, api, clearOld=False, timeout=60, processingDispatcherCountMax=0, safely=True):
       self._deepLock()
       mytime=self._getms()
-      while self.processingRequestCount>0 or self.processingDispatcherCount>0:
-         if self._isNum(timeout) and self._getms()-mytime>=timeout*1000:
-            self._logger('Warning: So long wait for completing requests(%s) and dispatchers(%s)'%(self.processingRequestCount, self.processingDispatcherCount))
-            break
-         self._sleep(self.setts.sleepTime_checkProcessingCount)
+      self._waitProcessingDispatchers(timeout=timeout, processingDispatcherCountMax=processingDispatcherCountMax)
+      # stop execBackends
+      self._stopExecBackends(timeout=timeout-(self._getms()-mytime)/1000.0, processingDispatcherCountMax=processingDispatcherCountMax)
+      # reloading
+      oldRoutes=self.routes
       if clearOld: self.routes={}
       api=api if self._isArray(api) else [api]
-      for o in api:
-         if not self._isDict(o): continue
-         path=o.get('path', '')
-         dispatcher=o.get('dispatcher')
-         if not dispatcher:
-            self._deepUnlock()
-            self._throw('Empty dispatcher for "_reload()"')
-         if o.get('isInstance', False):
-            self.registerInstance(dispatcher, path)
-         else:
-            self.registerFunction(dispatcher, path, name=o.get('name', None))
+      try:
+         for o in api:
+            if not self._isDict(o): continue
+            path=o.get('path', '')
+            dispatcher=o.get('dispatcher')
+            if not dispatcher:
+               self._deepUnlock()
+               self._throw('Empty dispatcher"')
+            if o.get('isInstance', False):
+               self.registerInstance(dispatcher, path, fallback=o.get('fallback', None), dispatcherBackend=o.get('dispatcherBackend', None), notifBackend=o.get('notifBackend', None))
+            else:
+               self.registerFunction(dispatcher, path, name=o.get('name', None), fallback=o.get('fallback', None), dispatcherBackend=o.get('dispatcherBackend', None), notifBackend=o.get('notifBackend', None))
+      except Exception, e:
+         msg='ERROR on <server>._reload(): %s'%e
+         if safely:
+            self.routes=oldRoutes
+            self._logger(msg)
+            self._logger('Server is reloaded in safe-mode, so all dispatchers was restored. But if you overloaded some globals in callback, they can not be restored!')
+         else: self._throw(msg)
+      # start execBackends
+      self._startExecBackends()
       self._deepUnlock()
 
-   def reload(self, api, clearOld=False, timeout=60):
+   def reload(self, api, clearOld=False, timeout=60, processingDispatcherCountMax=0, safely=True):
       api2=api if self._isArray(api) else [api]
       mArr={}
       api=[]
       for o in api2:
          if not self._isDict(o): continue
-         scriptPath=o.get('scriptPath', None)
+         scriptPath=o.get('scriptPath', self._getScriptPath(True))
          scriptName=o.get('scriptName', '')
          dispatcherName=o.get('dispatcher', '')
          isInstance=o.get('isInstance', False)
@@ -598,7 +615,8 @@ class flaskJSONRPCServer:
          overload=o.get('overload', None)
          path=o.get('path', '')
          name=o.get('dispatcherName', None)
-         if scriptPath and dispatcherName:
+         # start importing new code
+         if scriptPath and dispatcherName and self._isString(dispatcherName):
             if exclusiveModule:
                module=imp.load_source(scriptName, scriptPath)
             else:
@@ -618,14 +636,43 @@ class flaskJSONRPCServer:
             module=dispatcher
          else:
             self._throw('Incorrect data for "reload()"')
+         # overloading with passed objects or via callback
          overload=overload if self._isArray(overload) else [overload]
-         for o in overload:
-            if not o: continue
-            elif self._isDict(o):
-               for k, v in o.items(): setattr(module, k, v)
-            elif self._isFunction(o): o(self, module, dispatcher)
-         api.append({'dispatcher':dispatcher, 'path':path, 'isInstance':isInstance, 'name':name})
-      self._thread(target=self._reload, kwargs={'api':api, 'clearOld':clearOld, 'timeout':timeout})
+         for oo in overload:
+            if not oo: continue
+            elif self._isDict(oo):
+               for k, v in oo.items(): setattr(module, k, v)
+            elif self._isFunction(oo): oo(self, module, dispatcher)
+         # additional settings
+         allowJSONP=o.get('fallback', None)
+         dispatcherBackend=o.get('dispatcherBackend', None)
+         notifBackend=o.get('notifBackend', None)
+         # get additional settings from original dispatcher
+         if isInstance:
+            if (allowJSONP is None) or (dispatcherBackend is None) or (notifBackend is None):
+               # dispatcher's settings stored for Class methods, not for Class instance
+               # so we need to find at least one Class method, stored previosly
+               d=None
+               p=self._formatPath(path)
+               for n in dir(dispatcher):
+                  link=getattr(dispatcher, n)
+                  if not self._isFunction(link): continue
+                  d=self.routes[p][n]
+                  break
+               if d:
+                  if allowJSONP is None: allowJSONP=d.allowJSONP
+                  if dispatcherBackend is None: dispatcherBackend=d.dispatcherBackendId
+                  if notifBackend is None: notifBackend=d.notifBackendId
+         else:
+            n=(name or dispatcherName)
+            p=self._formatPath(path)
+            if p in self.routes and n in self.routes[p]:
+               if allowJSONP is None: allowJSONP=self.routes[p][n].allowJSONP
+               if dispatcherBackend is None: dispatcherBackend=self.routes[p][n].dispatcherBackendId
+               if notifBackend is None: notifBackend=self.routes[p][n].notifBackendId
+         # add result
+         api.append({'dispatcher':dispatcher, 'path':path, 'isInstance':isInstance, 'name':name, 'fallback':allowJSONP, 'dispatcherBackend':dispatcherBackend, 'notifBackend':notifBackend})
+      self._thread(target=self._reload, kwargs={'api':api, 'clearOld':clearOld, 'timeout':timeout, 'processingDispatcherCountMax':processingDispatcherCountMax, 'safely':safely})
 
    def _callDispatcher(self, path, data, request, isJSONP=False, nativeThread=None, overload=None):
       try:
@@ -719,8 +766,7 @@ class flaskJSONRPCServer:
             self.connPerMinute.minCount=self.connPerMinute.count
          self.connPerMinute.count=0
       self.connPerMinute.count+=1
-      path=path if path.startswith('/') else '/'+path
-      path=path if path.endswith('/') else path+'/'
+      path=self._formatPath(path)
       if path not in self.routes:
          self._logger('UNKNOWN_PATH:', path)
          return Response(status=404)
@@ -890,11 +936,15 @@ class flaskJSONRPCServer:
                self.restart()
                break
 
-   def start(self, joinLoop=False):
-      """ Start server's loop """
+   def _startExecBackends(self):
       # start execBackends
       for _id, bck in self.execBackend.items():
          if hasattr(bck, 'start'): bck.start(self)
+
+   def start(self, joinLoop=False):
+      """ Start server's loop """
+      # start execBackends
+      self._startExecBackends()
       # reset flask routing (it useful when somebody change self.flaskApp)
       self._registerServerUrl(dict([[s, self._requestHandler] for s in self.pathsDef]))
       if self.setts.gevent:
@@ -949,18 +999,28 @@ class flaskJSONRPCServer:
          else: stop()
       except Exception, e: return e
 
-   def stop(self, timeout=20, processingDispatcherCountMax=0):
-      self._deepLock()
-      mytime=self._getms()
-      while self.processingDispatcherCount>processingDispatcherCountMax:
-         if timeout and self._getms()-mytime>=timeout*1000:
-            self._logger('Warning: So long wait for completing dispatchers(%s)'%(self.processingDispatcherCount))
-            break
-         self._sleep(self.setts.sleepTime_checkProcessingCount)
+   def _stopExecBackends(self, timeout=20, processingDispatcherCountMax=0):
       # stop execBackends
+      mytime=self._getms()
       for _id, bck in self.execBackend.items():
          if hasattr(bck, 'stop'):
             bck.stop(self, timeout=timeout-(self._getms()-mytime)/1000.0, processingDispatcherCountMax=processingDispatcherCountMax)
+
+   def _waitProcessingDispatchers(self, timeout=20, processingDispatcherCountMax=0):
+      mytime=self._getms()
+      if processingDispatcherCountMax is not False:
+         while self.processingDispatcherCount>processingDispatcherCountMax:
+            if timeout and self._getms()-mytime>=timeout*1000:
+               self._logger('Warning: So long wait for completing dispatchers(%s)'%(self.processingDispatcherCount))
+               break
+            self._sleep(self.setts.sleepTime_checkProcessingCount)
+
+   def stop(self, timeout=20, processingDispatcherCountMax=0):
+      self._deepLock()
+      mytime=self._getms()
+      self._waitProcessingDispatchers(timeout=timeout, processingDispatcherCountMax=processingDispatcherCountMax)
+      # stop execBackends
+      self._stopExecBackends(timeout=timeout-(self._getms()-mytime)/1000.0, processingDispatcherCountMax=processingDispatcherCountMax)
       # stop server's backend
       if self.setts.gevent:
          try: self._server.stop(timeout=timeout-(self._getms()-mytime)/1000.0)
@@ -1176,9 +1236,11 @@ class execBackend_parallelWithSocket:
                try: p.terminate()
                except Exception, e: pass
             break
+      self._pool=[]
       self._forceStop=False
       # stop api
-      self._server(timeout=timeout-(server._getms()-mytime)/1000.0)
+      self._server.stop(timeout=timeout-(server._getms()-mytime)/1000.0)
+      self._server=None
 
    def sendRequest(self, path, method, params=[], notif=False):
       mytime=self._server._getms()
@@ -1254,6 +1316,7 @@ class execBackend_parallelWithSocket:
       self._lazyRequestLatTime=self._server._getms()
 
    def childCallDispatcher(self, p):
+      self._server._logger('Processing with backend "parallelWithSocket": %s()'%(p['dataIn']['method']))
       p['request']=magicDict(p['request']) # _callDispatcher() work with this like object, not dict
       status, params, result=self._parentServer._callDispatcher(p['path'], p['dataIn'], p['request'], overload=self.childConnectionOverload, nativeThread=self.settings.allowThreads and not(self._parentServer.setts.gevent), isJSONP=p.get('isJSONP', False))
       if not self.settings.saveResult: return

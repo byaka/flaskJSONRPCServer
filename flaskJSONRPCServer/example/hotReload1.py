@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import sys, time, random, os
+
 """
 This example show how to reload API without restarting server.
 This function fully safe, waits for completing old requests,
@@ -23,15 +24,14 @@ def stats(_connection=None):
    return _connection.server.stats(inMS=True) #inMS=True return stats in milliseconds
 
 # dispatcher for reloading, call him
-def reload(_connection=None):
-   global inst
-   path=os.path.dirname(os.path.realpath(sys.argv[0]))
+def reloadApi(_connection=None):
+   global myInstance
    # reloading really reloads module, so we need to overload variables
-   def tOverloadForClassInstance(server, module, dispatcher): dispatcher.data=inst.data
+   def tOverloadForClassInstance(server, module, dispatcher): dispatcher.data=myInstance.data
    tArr1=[
       {
          'info':'reloadAndReplace.py',
-         'scriptPath':path+'/reloadAndReplace.py',
+         'scriptPath':_connection.server._getScriptPath(True),
          'dispatcher':'mySharedMethods',
          'isInstance':True,
          'overload': tOverloadForClassInstance,
@@ -39,10 +39,10 @@ def reload(_connection=None):
       },
       {
          'info':'rr1.py',
-         'scriptPath':path+'/rr1.py',
+         'scriptPath':_connection.server._getScriptPath()+'/rr1.py',
          'dispatcher':'compute',
          'isInstance':False,
-         'overload': {'data':inst.data},
+         'overload': {'data':myInstance.data},
          'path':'/api' # don't forget about path
       },
       {
@@ -55,8 +55,8 @@ def reload(_connection=None):
    # randomly choice new dispatcher
    s=random.choice(tArr1)
    print 'Reload api to "%s"..'%s['info']
-   # if <clearOld> = True, all existing dispatchers will be removed
-   # <timeout> is how long (in seconds) we wait for compliting all existing requests
+   # <clearOld>   if True, all existing dispatchers will be removed
+   # <timeout>    is how long (in seconds) we wait for compliting all existing requests
    _connection.server.reload(s, clearOld=False, timeout=3)
 
 # simply generate data for computing
@@ -66,9 +66,9 @@ def genData(data):
 
 if __name__=='__main__':
    # generate random data
-   global inst
-   inst=mySharedMethods()
-   genData(inst.data)
+   global myInstance
+   myInstance=mySharedMethods()
+   genData(myInstance.data)
    print 'Running api..'
    # Creating instance of server
    #    <blocking>         switch server to sync mode when <gevent> is False
@@ -84,10 +84,10 @@ if __name__=='__main__':
    #    <notifBackend>     set backend for Notify-requests
    server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000])
    # Register dispatcher for all methods of instance
-   server.registerInstance(inst, path='/api')
+   server.registerInstance(myInstance, path='/api')
    # Register dispatchers for single functions
    server.registerFunction(stats, path='/api')
-   server.registerFunction(reload, path='/api')
+   server.registerFunction(reloadApi, path='/api')
    # Run server
    server.serveForever()
    # Now you can access this api by path http://127.0.0.1:7001/api for JSON-RPC requests

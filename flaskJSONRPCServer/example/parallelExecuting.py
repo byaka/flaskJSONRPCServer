@@ -5,10 +5,17 @@ import sexyPrime
 
 from flaskJSONRPCServer import flaskJSONRPCServer
 
+global needRestart
+needRestart=False
+
 sexy_speedStats={}
 
 testVar=1
 testFunc=lambda s: '__%s__'%s
+
+def restart(_connection=None):
+   global needRestart
+   needRestart=True
 
 def testScope(_connection=None):
    # original "testVar"
@@ -107,7 +114,7 @@ if __name__=='__main__':
    #    <tweakDescriptors> set descriptor's limit for server
    #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
    #    <notifBackend>     set backend for Notify-requests
-   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', tweakDescriptors=[1000, 1000], dispatcherBackend='parallelWithSocket', notifBackend='parallelWithSocket')
+   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=True, fallback=True, allowCompress=False, jsonBackend='simplejson', tweakDescriptors=[1000, 1000], dispatcherBackend='parallelWithSocket', notifBackend='parallelWithSocket')
    # Register dispatchers for single functions
    server.registerFunction(stats, path='/api', dispatcherBackend='simple')
    server.registerFunction(test1, path='/api')
@@ -118,9 +125,17 @@ if __name__=='__main__':
    server.registerFunction(echo, path='/api')
    server.registerFunction(sexyNum, path='/api')
    server.registerFunction(sexyNum, path='/api', dispatcherBackend='simple', name='sexyNum2')
+   server.registerFunction(restart, path='/api', dispatcherBackend='simple')
 
    # Run server
-   server.serveForever()
+   server.start()
+   while True:
+      server._sleep(1)
+      if needRestart:
+         needRestart=False
+         print 'Restarting..'
+         server.restart()
+         print 'ok'
    # Now you can access this api by path http://127.0.0.1:7001/api for JSON-RPC requests
    # Or by path http://127.0.0.1:7001/api/<method>?jsonp=<callback>&(params) for JSONP requests
    #    For example by http://127.0.0.1:7001/api/echo?data=test_data&jsonp=jsonpCallback_129620
