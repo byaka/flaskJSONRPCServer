@@ -1,22 +1,17 @@
 # -*- coding: utf-8 -*-
-import sys, time, random
+import sys, time, random, os
 
 import sexyPrime
 
 from flaskJSONRPCServer import flaskJSONRPCServer
 
-global needRestart
 needRestart=False
-
-sexy_speedStats={}
-
-testVar=1
-testFunc=lambda s: '__%s__'%s
-
 def restart(_connection=None):
    global needRestart
    needRestart=True
 
+testVar=1
+testFunc=lambda s: '__%s__'%s
 def testScope(_connection=None):
    # original "testVar"
    print '"testVar" in global scope:', _connection.call.eval('testFunc(testVar)')
@@ -54,13 +49,36 @@ def test3(_connection=None):
    return 'test3'
 
 def test4(_connection=None):
+   # simple sleep
    _connection.call.sleep(5)
-   # time.sleep(5)
    return 'ok'
+
+testCopyGlobal=[]
+def testCopyGlobal_proc(_connection=None):
+   # get data from global variable
+   if _connection.get('parallelType', False):
+      tArr=_connection.call.copyGlobal('testCopyGlobal', actual=True, updateGlobals=True)
+   else: tArr=testCopyGlobal
+   # here we slowly process this data
+   sMax=max(tArr)
+   sMin=min(tArr)
+   sSum=0.0
+   for s in tArr: sSum+=s
+   sAverage=sSum/float(len(tArr))
+   sProd=1.0
+   for s in tArr: sProd*=s
+   sGeomean=sProd**(1/float(len(tArr)))
+   return 'max: %s, min: %s, average: %s, geomean: %s'%(sMax, sMin, sAverage, sGeomean)
+
+def testCopyGlobal_gen(_connection=None):
+   # generate random data
+   global testCopyGlobal
+   testCopyGlobal=[round((random.random()+0.01)*99, 2) for i in xrange(1*10**6)]
 
 def echo(data='Hello world', _connection=None):
    return data
 
+sexy_speedStats={}
 def sexyNum(n=None, _connection=None):
    # for parallel backend
    if n is None: n=random.randint(25000, 35000)
@@ -98,7 +116,7 @@ def sexyNum(n=None, _connection=None):
 
 def stats(_connection=None):
    #return server's speed stats
-   return _connection.server.stats(inMS=False) #inMS=True return stats in milliseconds
+   return _connection.server.stats(inMS=True) #inMS=True return stats in milliseconds
 
 if __name__=='__main__':
    print 'Running api..'
@@ -114,18 +132,25 @@ if __name__=='__main__':
    #    <tweakDescriptors> set descriptor's limit for server
    #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
    #    <notifBackend>     set backend for Notify-requests
-   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=True, fallback=True, allowCompress=False, jsonBackend='simplejson', tweakDescriptors=[1000, 1000], dispatcherBackend='parallelWithSocket', notifBackend='parallelWithSocket')
+   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', tweakDescriptors=[1000, 1000], dispatcherBackend='parallelWithSocket', notifBackend='simple')
    # Register dispatchers for single functions
    server.registerFunction(stats, path='/api', dispatcherBackend='simple')
    server.registerFunction(test1, path='/api')
    server.registerFunction(test2, path='/api')
    server.registerFunction(test3, path='/api')
    server.registerFunction(test4, path='/api')
+
    server.registerFunction(testScope, path='/api')
+
    server.registerFunction(echo, path='/api')
+
    server.registerFunction(sexyNum, path='/api')
    server.registerFunction(sexyNum, path='/api', dispatcherBackend='simple', name='sexyNum2')
+
    server.registerFunction(restart, path='/api', dispatcherBackend='simple')
+
+   server.registerFunction(testCopyGlobal_proc, path='/api')
+   server.registerFunction(testCopyGlobal_gen, path='/api', dispatcherBackend='simple')
 
    # Run server
    server.start()
