@@ -1022,10 +1022,11 @@ class flaskJSONRPCServer:
       self._startExecBackends()
       # reset flask routing (it useful when somebody change self.flaskApp)
       self._registerServerUrl(dict([[s, self._requestHandler] for s in self.pathsDef]))
+      if self.settings.allowCompress: self._logger('WARNING: included compression is slow')
       if self.setts.gevent:
-         self._logger('SERVER RUNNING AS GEVENT..')
          try: import gevent
          except ImportError: self._throw('gevent backend not found')
+         self._logger('SERVER RUNNING AS GEVENT..')
          from gevent import monkey
          monkey.patch_all(sys=False, os=False, thread=False, time=False, ssl=False, socket=False) #! "os" may cause some problems with multiprocessing. but better get original objects in execBackend
          self._importAll()
@@ -1046,6 +1047,7 @@ class flaskJSONRPCServer:
             self._server=WSGIServer(bindAdress, self.flaskApp, log=('default' if self.setts.debug else False), spawn=self._serverPool, keyfile=self.setts.ssl[0], certfile=self.setts.ssl[1], ssl_version=ssl.PROTOCOL_TLSv1_2) #ssl.PROTOCOL_SSLv23
          else:
             self._server=WSGIServer(bindAdress, self.flaskApp, log=('default' if self.setts.debug else False), spawn=self._serverPool)
+         if self.setts.blocking: self._logger('WARNING: blocking mode not implemented for gevent')
          if joinLoop: self._server.serve_forever()
          else: self._server.start()
       else:
@@ -1239,7 +1241,7 @@ class execBackend_threaded:
       return r
 
 class execBackend_parallelWithSocket:
-   def __init__(self, poolSize=1, importGlobalsFromParent=True, parentGlobals=None, sleepTime_resultCheck=0.15, sleepTime_emptyQueue=0.3, sleepTime_waitLock=0.75, sleepTime_lazyRequest=2*60*1000, sleepTime_checkPoolStopping=0.3, allowThreads=False, id='execBackend_parallelWithSocket', socketPath=None, saveResult=True, persistent_queueGet=True):
+   def __init__(self, poolSize=1, importGlobalsFromParent=True, parentGlobals=None, sleepTime_resultCheck=0.15, sleepTime_emptyQueue=0.3, sleepTime_waitLock=0.75, sleepTime_lazyRequest=2*60*1000, sleepTime_checkPoolStopping=0.3, allowThreads=True, id='execBackend_parallelWithSocket', socketPath=None, saveResult=True, persistent_queueGet=True, useCPickle=False):
       self.settings=magicDict({
          'poolSize':poolSize,
          'sleepTime_resultCheck':sleepTime_resultCheck,
@@ -1251,7 +1253,8 @@ class execBackend_parallelWithSocket:
          'allowThreads':allowThreads,
          'lazyRequestChunk':1000,
          'saveResult':saveResult,
-         'persistent_queueGet':persistent_queueGet
+         'persistent_queueGet':persistent_queueGet,
+         'useCPickle':useCPickle
       })
       from collections import deque
       self.parentGlobals=parentGlobals or {}
@@ -1263,17 +1266,20 @@ class execBackend_parallelWithSocket:
       self.result={}
       self.socketPath=socketPath
       self._forceStop=False
-      import cPickle
-      self._jsonBackend=magicDict({
-         'dumps': lambda data, **kwargs: cPickle.dumps(data),
-         'loads': lambda data, **kwargs: cPickle.loads(data)
-      })
       self._jsonBackend='simplejson'
+      if useCPickle:
+         import cPickle
+         self._jsonBackend=magicDict({
+            'dumps': lambda data, **kwargs: cPickle.dumps(data),
+            'loads': lambda data, **kwargs: cPickle.loads(data)
+         })
 
    def start(self, server):
       if self._server: return
       if not server.setts.gevent:
          server._throw('ExecBackend "parallelWithSocket" not implemented for Flask backend yet')
+      # warnings
+      if self.settings.useCPickle: server._logger('WARNING: cPickle is slow backend')
       # generate socket-file
       if not self.socketPath:
          self.socketPath='%s/.%s.%s.sock'%(server._getScriptPath(), server._getScriptName(withExt=False), self._id)
@@ -1283,6 +1289,10 @@ class execBackend_parallelWithSocket:
       # import parent's globals if needed
       if self.settings.importGlobalsFromParent:
          server._importGlobalsFromParent(scope=self.parentGlobals)
+      # patching
+      from gevent import monkey
+      monkey.patch_all(sys=False, os=False, thread=False, time=False, ssl=False, socket=False) #! "os" may cause some problems with multiprocessing. but better get original objects in execBackend
+      server._importAll(forceDelete=True)
       # start processesPool
       """
       if this block go after starting new API, server has really strange problems with "doubled" variables and etc.
@@ -1296,9 +1306,6 @@ class execBackend_parallelWithSocket:
          self._pool.append(p)
       # create api on unix-socket
       self._parentServer=server
-      from gevent import monkey
-      monkey.patch_all(sys=False, os=False, thread=False, time=False, ssl=False, socket=False) #! "os" may cause some problems with multiprocessing. but better get original objects in execBackend
-      server._importAll(forceDelete=True) #IMPORTANT! without this child hangs on socket operations
       listener=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
       listener.bind(self.socketPath)
       listener.listen(1)
@@ -1382,17 +1389,11 @@ class execBackend_parallelWithSocket:
       self._conn=None
       self._lazyRequest={}
       self._lazyRequestLatTime=None
-      #! See issue #27
-      parentServer.setts.gevent=False
-      parentServer._importAll(forceDelete=True)
-      # from gevent import monkey
-      # monkey.patch_all(sys=False, os=False, thread=False, time=False, ssl=False, socket=False) #! "os" may cause some problems with multiprocessing. but better get original objects in execBackend
-      # if not self.settings.allowThreads:
-      #    # if threads not allowed, we don't need gevent in child
-      #    parentServer.setts.gevent=False
-      # parentServer._importAll(forceDelete=True)
       self._server=flaskJSONRPCServer(['', ''], gevent=parentServer.setts.gevent, log=parentServer.setts.log, jsonBackend=self._jsonBackend, tweakDescriptors=None) #we need this dummy for some methods from it
       if not self.settings.allowThreads:
+         # if threads not allowed, we don't need gevent in child
+         parentServer.setts.gevent=False
+         parentServer._importAll(forceDelete=True)
          # in threaded mode (also gevent) we can't use same socket for read and write
          self._conn=UnixHTTPConnection(self.socketPath)
       # create hashmap for parentGlobals
