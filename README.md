@@ -2,8 +2,10 @@
 [![PyPI downloads](https://img.shields.io/pypi/dm/flaskJSONRPCServer.svg)](https://pypi.python.org/pypi/flaskJSONRPCServer)
 [![License](https://img.shields.io/pypi/l/flaskJSONRPCServer.svg)](http://www.apache.org/licenses/LICENSE-2.0.html)
 
+[TOC]
+
 # flaskJSONRPCServer
-This library is an implementation of the JSON-RPC specification. It supports only 2.0 specification for now, which includes batch submission, keyword arguments, etc.
+This library is an implementation of the JSON-RPC specification. It supports only 2.0 specification for now, which includes batch submission, keyword arguments, notifications, etc.
 
 ## Comments, bug reports
 flaskJSONRPCServer resides on **github**. You can file issues or pull requests [there](https://github.com/byaka/flaskJSONRPCServer/issues).
@@ -14,19 +16,22 @@ flaskJSONRPCServer resides on **github**. You can file issues or pull requests [
  - Gevent >= 1.0 (optionally)
 
 ## Pros
-
- - Lib tested over **highload** (>=60 connections per second, 24/7 and it's not simulation) with **Gevent** enabled and no stability issues or memory leak (this is why i'm wrote this library)
+ - Lib ready for **production**, we use it in some products
+ - Lib tested over **"highload"** (over 60 connections per second, 24/7 and it's not simulation) with **Gevent** enabled and no stability issues or memory leak (this is why i'm wrote this library)
  - Auto **CORS**
  - Simple switching to **Gevent** as backend
  - Auto fallback to **JSONP** on GET requests (for old browsers, that don't support CORS like **IE**<10)
  - Dispatchers can simply get info about connection (**IP**, **Cookies**, **Headers**)
  - Dispatchers can simply set **Cookies**, change output **Headers**, change output format for **JSONP** requests
- - Lib can be simply integrated with another **Flask** app on the same IP:PORT
  - Lib fully support **Notification** requests (see example/notify.py)
  - Lib supports **restarting** server (see example/restart.py)
- - Lib supports **hot reloading** of API (see example/reloadAndReplace.py)
+ - Lib supports **hot reloading** of API (see example/hotReload1.py, example/hotReload2.py)
  - Lib supports **multiple servers** in one app (see example/multiple.py)
- - Lib supports **merging** with another WSGI app (see example/mergeFlaskApp.py)
+ - Lib supports **merging** with another WSGI app on the same IP:PORT (see example/mergeFlaskApp.py)
+ - Lib supports different **execution-backends**, for example multiprocessing (see example/parallelExecuting.py)
+ - Lib supports **locking** (you can lock all server or specific dispatchers)
+ - Lib supports different **serializing-backends** so you can implement any protocol, not only JSON
+ - Lib supports **individual settings** for different dispatchers. For example one of them can be processed with parallel (multiprocess) backend, other with standard processing.
 
 ## Cons
  - No **documentation**, only examples in package (sorry, i not have time for now)
@@ -34,6 +39,37 @@ flaskJSONRPCServer resides on **github**. You can file issues or pull requests [
 
 ## Install
 ```pip install flaskJSONRPCServer```
+
+## Hot-reloading
+You can overload source of server without stopping.
+```python
+server.reload(data, clearOld=False)
+```
+Flag ``<clearOld>`` will remove all earlier existing dispatchers.
+
+This operation safe, if something goes wrong, lib restore previous source. While reloading, server stop processing requests, but not reject them. Server handle all requests, and when reloading completed, all handled requests will be processed. It also wait for completing processing requests before start reloading and you can pass ``<timeout>`` for this waiting. Also you can pass ``<processingDispatcherCountMax>`` and server will not wait for given number of processed requests.
+
+When reloading, you can change source, merge new variables with old and many more.
+
+```python
+data=[
+   {'dispatcher':'testForReload1', 'scriptPath':server._getScriptPath(True), 'isInstance':False,'overload':[{'globalVar1':globalVar1}, callbackForManualOverload], 'path':'/api'}
+]
+```
+
+For now overloading supports for any dispatcher or several dispatchers separately (you can fully change all dispatcher's settings and of course source and variables).
+
+When you reload dispatcher and give path for file (of course it can be same file as "main"), this file imported. Then lib overloaded variables and attributes you give and replace old dispatcher with new from this module. If you give one path for several dispatchers, they all work in one imported file (in this case file will import one time only, not for every dispatcher).
+
+If you need to overload some objects, that not dispatchers but used in them, you simply can do this with callback.
+
+```python
+def callbackForManualOverload(server, module, dispatcher):
+   # overload globals also
+   for k in dir(module):
+      globals()[k]=getattr(module, k)
+```
+This code overload all global variables and replace them with variables from just imported file. In future i add simple method for reloading all source of server.
 
 ## Examples
 Simple server
