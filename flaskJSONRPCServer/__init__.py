@@ -865,8 +865,9 @@ class flaskJSONRPCServer:
          res=self._requestProcess(path, method)
          return res
       except Exception:
-         self._logger('ERROR processing request: %s'%(self._getErrorInfo()))
-         return Response(status=500)
+         s=self._getErrorInfo()
+         self._logger('ERROR processing request: %s'%(s))
+         return Response(status=500, response=s)
 
    def _requestProcess(self, path, method):
       if self._inChild(): self._throw('This method can be called only from <main> process')
