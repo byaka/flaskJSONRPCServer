@@ -36,8 +36,8 @@ Response=None
 from utils import UnixHTTPConnection, magicDict
 
 try:
-   from experimental import initGlobal, initLocal
-   initGlobal(globals())
+   import experimental as experimentalPack
+   experimentalPack.initGlobal(globals())
 except ImportError, e: print 'EXPERIMENTAL package not founded', e
 
 class flaskJSONRPCServer:
@@ -96,6 +96,7 @@ class flaskJSONRPCServer:
       self._parentModule=None
       self._findParentModule()
       self._werkzeugStopToken=''
+      self._reloadBackup={}
       self.deepLocked=False
       self.processingRequestCount=0
       self.processingDispatcherCount=0
@@ -121,7 +122,7 @@ class flaskJSONRPCServer:
       # select Notif-backend
       self.defaultNotifBackendId=self._registerExecBackend(notifBackend, notif=True)
       # enable experimental
-      if experimental: initLocal(locals(), self)
+      if experimental: experimentalPack.initLocal(locals(), self)
       # call patchServer if existed
       if self._isFunction(locals().get('_patchServer', None)): locals()['_patchServer'](self)
       # check JSON-backend
@@ -757,7 +758,7 @@ class flaskJSONRPCServer:
          api.append({'dispatcher':dispatcher, 'path':path, 'isInstance':isInstance, 'name':name, 'fallback':allowJSONP, 'dispatcherBackend':dispatcherBackend, 'notifBackend':notifBackend})
       self._thread(target=self._reload, kwargs={'api':api, 'clearOld':clearOld, 'timeout':timeout, 'processingDispatcherCountMax':processingDispatcherCountMax, 'safely':safely})
 
-   def _callDispatcher(self, path, data, request, isJSONP=False, nativeThread=None, overload=None):
+   def _callDispatcher(self, uniqueId, path, data, request, isJSONP=False, nativeThread=None, overload=None):
       try:
          self.processingDispatcherCount+=1
          _sleep=lambda s, forceNative=nativeThread: self._sleep(s, forceNative=forceNative)
@@ -775,6 +776,7 @@ class flaskJSONRPCServer:
                'ip':request.environ.get('HTTP_X_REAL_IP', request.remote_addr),
                'cookiesOut':[],
                'headersOut':{},
+               'uniqueId':uniqueId,
                'jsonp':isJSONP,
                'allowCompress':self.setts.allowCompress,
                'server':self,
@@ -822,7 +824,9 @@ class flaskJSONRPCServer:
       mytime=self._getms()
       gzip_buffer=StringIO()
       l=len(data)
-      with GzipFile(mode='wb', fileobj=gzip_buffer, compresslevel=3) as f: f.write(data)
+      f=GzipFile(mode='wb', fileobj=gzip_buffer, compresslevel=3)
+      f.write(data)
+      f.close()
       res=gzip_buffer.getvalue()
       print '>> compression %s%%, original size %smb'%(round((1-len(res)/float(l))*100.0, 1), round(l/1024.0/1024.0, 2))
       self._speedStatsAdd('compressResponse', self._getms()-mytime)
@@ -831,7 +835,9 @@ class flaskJSONRPCServer:
    def _uncompressGZIP(self, data):
       mytime=self._getms()
       gzip_buffer=StringIO(data)
-      with GzipFile('', 'r', 0, gzip_buffer) as f: res=f.read()
+      f=GzipFile('', 'r', 0, gzip_buffer)
+      res=f.read()
+      f.close()
       self._speedStatsAdd('uncompressResponse', self._getms()-mytime)
       return res
 
@@ -932,7 +938,7 @@ class flaskJSONRPCServer:
                         status, m=execBackend.add(uniqueId, path, dataIn, self._copyRequestContext(request))
                         if not status: self._logger('Error in notifBackend.add(): %s'%m)
                      else:
-                        status, params, result=self._callDispatcher(path, dataIn, request)
+                        status, params, result=self._callDispatcher(uniqueId, path, dataIn, request)
                   else: #simple request
                      execBackend=self.execBackend.get(dispatcher.dispatcherBackendId, None)
                      if execBackend and hasattr(execBackend, 'add') and hasattr(execBackend, 'check'):
@@ -941,7 +947,7 @@ class flaskJSONRPCServer:
                         if not status: result='Error in dispatcherBackend.add(): %s'%m
                         else: status, params, result=execBackend.check(uniqueId)
                      else:
-                        status, params, result=self._callDispatcher(path, dataIn, request)
+                        status, params, result=self._callDispatcher(uniqueId, path, dataIn, request)
                      if status:
                         if '_connection' in params: #get additional headers and cookies
                            outHeaders.update(params['_connection'].headersOut)
@@ -991,7 +997,7 @@ class flaskJSONRPCServer:
                if not status: result='Error in dispatcherBackend.add(): %s'%m
                else: status, params, result=execBackend.check(uniqueId)
             else:
-               status, params, result=self._callDispatcher(path, dataIn, request, isJSONP=jsonpCB)
+               status, params, result=self._callDispatcher(uniqueId, path, dataIn, request, isJSONP=jsonpCB)
             if status:
                if '_connection' in params: #get additional headers and cookies
                   outHeaders.update(params['_connection'].headersOut)
@@ -1251,7 +1257,7 @@ class execBackend_threaded:
          self._parentServer._thread(self.childExecute, args=[tArr1, isForceNative or not(self._parentServer.setts.gevent)], forceNative=isForceNative)
 
    def childExecute(self, p, nativeThread=False):
-      status, params, result=self._parentServer._callDispatcher(p['path'], p['dataIn'], p['request'], nativeThread=nativeThread, isJSONP=p.get('isJSONP', False))
+      status, params, result=self._parentServer._callDispatcher(p['uniqueId'], p['path'], p['dataIn'], p['request'], nativeThread=nativeThread, isJSONP=p.get('isJSONP', False))
       if not status:
          self._parentServer._logger('ERROR in notifBackend._callDispatcher():', result)
          print '!!! ERROR_processing', result
@@ -1344,7 +1350,12 @@ class execBackend_parallelWithSocket:
       listener=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
       listener.bind(self.socketPath)
       listener.listen(1)
-      self._server=flaskJSONRPCServer([self.socketPath, listener], blocking=False, cors=False, gevent=server.setts.gevent, debug=False, log=server.settings.log, fallback=False, allowCompress=True, compressMinSize=10*1024*1024, jsonBackend=self._jsonBackend, tweakDescriptors=None, notifBackend='simple', dispatcherBackend='simple', experimental=server.settings.experimental)
+      #select compression settings
+      allowCompress=False
+      compressMinSize=100*1024*1024
+      if server.settings.experimental and experimentalPack.use_moreAsync and '_compressGZIP' in experimentalPack.moreAsync_methods: allowCompress=True
+      #start API
+      self._server=flaskJSONRPCServer([self.socketPath, listener], blocking=False, cors=False, gevent=server.setts.gevent, debug=False, log=server.settings.log, fallback=False, allowCompress=allowCompress, compressMinSize=compressMinSize, jsonBackend=self._jsonBackend, tweakDescriptors=None, notifBackend='simple', dispatcherBackend='simple', experimental=server.settings.experimental)
       self._server.setts.antifreeze_batchMaxTime=1*1000
       self._server.setts.antifreeze_batchBreak=False
       self._server.setts.antifreeze_batchSleep=1
@@ -1489,7 +1500,7 @@ class execBackend_parallelWithSocket:
    def childCallDispatcher(self, p):
       self._server._logger('Processing with backend "parallelWithSocket": %s()'%(p['dataIn']['method']))
       p['request']=magicDict(p['request']) # _callDispatcher() work with this like object, not dict
-      status, params, result=self._parentServer._callDispatcher(p['path'], p['dataIn'], p['request'], overload=self.childConnectionOverload, nativeThread=self.settings.allowThreads and not(self._parentServer.setts.gevent), isJSONP=p.get('isJSONP', False))
+      status, params, result=self._parentServer._callDispatcher(p['uniqueId'], p['path'], p['dataIn'], p['request'], overload=self.childConnectionOverload, nativeThread=self.settings.allowThreads and not(self._parentServer.setts.gevent), isJSONP=p.get('isJSONP', False))
       if not self.settings.saveResult: return
       # prepare for pickle
       #! #57 It must be on TYPE-based, not NAME-based

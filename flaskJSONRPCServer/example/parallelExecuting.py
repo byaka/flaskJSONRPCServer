@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import sys, time, random, os
-
 import sexyPrime
 
 from flaskJSONRPCServer import flaskJSONRPCServer
