@@ -24,40 +24,21 @@ __version__ = "%d.%d.%d%s" % (__ver_major__, __ver_minor__, __ver_patch__, __ver
    See the License for the specific language governing permissions and
    limitations under the License.
 """
-import sys, inspect, decimal, random, json, datetime, time, resource, os, zipfile, imp, urllib2, hashlib, httplib, threading
+
+import sys, inspect, decimal, random, json, datetime, time, resource, os, zipfile, imp, urllib2, hashlib, threading
 from types import InstanceType, IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, ModuleType, FunctionType
+from cStringIO import StringIO
+from gzip import GzipFile
 Flask=None
 request=None
 Response=None
 
-class UnixHTTPConnection(httplib.HTTPConnection):
-   """
-   This class adds support for unix-domain sockets to Python's httplib package.
-   Thx to Erik van Zijst.
-   https://bitbucket.org/evzijst/uhttplib/overview
-   """
-   def __init__(self, path, host='localhost', port=None, strict=None, timeout=None, socketClass=None):
-      httplib.HTTPConnection.__init__(self, host, port=port, strict=strict, timeout=timeout)
-      self.path=path
-      if socketClass: self.socketClass=socketClass
-      else:
-         import socket
-         self.socketClass=socket
+from utils import UnixHTTPConnection, magicDict
 
-   def connect(self):
-      sock=self.socketClass.socket(self.socketClass.AF_UNIX, self.socketClass.SOCK_STREAM)
-      sock.connect(self.path)
-      self.sock=sock
-
-class magicDict(dict):
-   """Get and set values like in Javascript (dict.<key>)"""
-   def __getattr__(self, attr):
-      if attr.startswith('__'): raise AttributeError #for support PICKLE protocol
-      return self.get(attr, None)
-   # __getattr__=dict.__getitem__
-   __setattr__=dict.__setitem__
-   __delattr__=dict.__delitem__
-   __reduce__=dict.__reduce__
+try:
+   from experimental import initGlobal, initLocal
+   initGlobal(globals())
+except ImportError, e: print 'EXPERIMENTAL package not founded', e
 
 class flaskJSONRPCServer:
    """
@@ -76,7 +57,7 @@ class flaskJSONRPCServer:
       :param str|dict|func notifBackend: Select Notif-backend for processing notify-requests. Lib include blocking backend ('simple') and non-blocking backend ('threadPool'). ThreadPool backend automatically switching to coroutines if gevent used. If this parameter 'dict' type, it must contain 'add' key as function. This function be called on notify-request. Optionally it can contain 'init' key as function and be called when server starting. If this parameter 'func' type, it will used like 'add'.
    """
 
-   def __init__(self, bindAdress, blocking=False, cors=False, gevent=False, debug=False, log=True, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=2*1024*1024, jsonBackend='simplejson', notifBackend='simple', dispatcherBackend='simple', auth=None):
+   def __init__(self, bindAdress, blocking=False, cors=False, gevent=False, debug=False, log=True, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=2*1024*1024, jsonBackend='simplejson', notifBackend='simple', dispatcherBackend='simple', auth=None, experimental=False):
       self.consoleColor=magicDict({'header':'\033[95m', 'okblue':'\033[94m', 'okgreen':'\033[92m', 'warning':'\033[93m', 'fail':'\033[91m', 'end':'\033[0m', 'bold':'\033[1m', 'underline':'\033[4m'})
       # Flask imported here for avoiding error in setup.py if Flask not installed yet
       global Flask, request, Response
@@ -106,7 +87,8 @@ class flaskJSONRPCServer:
          'antifreeze_batchMaxTime':2*1000,
          'antifreeze_batchSleep':1,
          'antifreeze_batchBreak':False,
-         'auth':auth
+         'auth':auth,
+         'experimental':experimental
       })
       self.setts=self.settings # backward compatible
       self.locked=False
@@ -120,18 +102,28 @@ class flaskJSONRPCServer:
       self.flaskApp=Flask(self.flaskAppName)
       self.pathsDef=['/<path>/', '/<path>', '/<path>/<method>/', '/<path>/<method>']
       self.routes={}
-      self._registerServerUrl(dict([[s, self._requestHandler] for s in self.pathsDef]))
       self.fixJSON=self._fixJSON
       # prepare speedStats
       self.speedStats={}
       self.speedStatsMax={}
       self.connPerMinute=magicDict({'nowMinute':0, 'count':0, 'oldCount':0, 'maxCount':0, 'minCount':0})
+      # register URLs
+      self._registerServerUrl(dict([[s, self._requestHandler] for s in self.pathsDef]))
       # select JSON-backend
       self.jsonBackend=json
       if self._isString(jsonBackend):
          try: self.jsonBackend=__import__(jsonBackend)
          except: self._logger('Cant import JSON-backend "%s", used standart'%(jsonBackend))
       elif jsonBackend: self.jsonBackend=jsonBackend
+      self.execBackend={}
+      # select Dispatcher-backend
+      self.defaultDispatcherBackendId=self._registerExecBackend(dispatcherBackend, notif=False)
+      # select Notif-backend
+      self.defaultNotifBackendId=self._registerExecBackend(notifBackend, notif=True)
+      # enable experimental
+      if experimental: initLocal(locals(), self)
+      # call patchServer if existed
+      if self._isFunction(locals().get('_patchServer', None)): locals()['_patchServer'](self)
       # check JSON-backend
       try:
          testVal_o={'test1':[1]}
@@ -139,11 +131,6 @@ class flaskJSONRPCServer:
          if testVal_o!=testVal_c:
             self._throw('values not match (%s, %s)'%(testVal_o, testVal_c))
       except Exception, e: self._throw('Unsupported JSONBackend %s: %s'%(jsonBackend, e))
-      self.execBackend={}
-      # select Dispatcher-backend
-      self.defaultDispatcherBackendId=self._registerExecBackend(dispatcherBackend, notif=False)
-      # select Notif-backend
-      self.defaultNotifBackendId=self._registerExecBackend(notifBackend, notif=True)
 
    def _registerExecBackend(self, execBackend, notif):
       if self._inChild(): self._throw('This method can be called only from <main> process')
@@ -173,8 +160,9 @@ class flaskJSONRPCServer:
       res=[str(s) for s in self.flaskApp.url_map.iter_rules()]
       return res
 
-   def _registerServerUrl(self, urlMap, methods=['GET', 'OPTIONS', 'POST']):
+   def _registerServerUrl(self, urlMap, methods=None):
       if self._inChild(): self._throw('This method can be called only from <main> process')
+      if methods is None: methods=['GET', 'OPTIONS', 'POST']
       urlNow=self._getServerUrl()
       for s, h in urlMap.items():
          if s in urlNow: continue
@@ -259,8 +247,10 @@ class flaskJSONRPCServer:
    def _inChild(self):
       return self._pid!=os.getpid()
 
-   def _getms(self):
-      return time.time()*1000.0
+   def _getms(self, inMS=True):
+      # return time.time()*1000.0
+      if inMS: return time.time()*1000.0
+      else: return int(time.time())
 
    def _isFunction(self, o): return hasattr(o, '__call__')
 
@@ -314,23 +304,46 @@ class flaskJSONRPCServer:
 
    def _sha1(self, text):
       #wrapper for sha1
+      mytime=self._getms()
       try:
          try: c=hashlib.sha1(text)
          except UnicodeEncodeError: c=hashlib.sha1(text.encode('utf8'))
-         return c.hexdigest()
+         s=c.hexdigest()
+         self._speedStatsAdd('sha1', self._getms()-mytime)
+         return s
       except Exception, e:
+         self._speedStatsAdd('sha1', self._getms()-mytime)
          self._logger('ERROR in _sha1():', e)
          return str(random.randint(99999, 9999999))
 
    def _sha256(self, text):
       #wrapper for sha256
+      mytime=self._getms()
       try:
          try: c=hashlib.sha256(text)
          except UnicodeEncodeError: c=hashlib.sha256(text.encode('utf8'))
-         return c.hexdigest()
+         s=c.hexdigest()
+         self._speedStatsAdd('sha256', self._getms()-mytime)
+         return s
       except Exception, e:
+         self._speedStatsAdd('sha256', self._getms()-mytime)
          self._logger('ERROR in _sha256():', e)
          return str(random.randint(99999, 9999999))
+
+   def _randomEx(self, mult=262144, vals=None, pref='', suf='', soLong=3, cbSoLong=lambda s: s*2):
+      if vals is None: vals=[]
+      s=pref+str(int(random.random()*mult))+suf
+      mytime=self._getms(False)
+      while(s in vals):
+         s=pref+str(int(random.random()*mult))+suf
+         if self._getms(False)-mytime>soLong: #защита от бесконечного цикла
+            mytime=self._getms(False)
+            self._logger('randomEx: generating value so long!')
+            if self._isFunction(cbSoLong):
+               mult=cbSoLong(mult, vals, pref, suf)
+               if mult is None: return None
+            else: return None
+      return s
 
    def _throw(self, data):
       raise ValueError(data)
@@ -362,7 +375,11 @@ class flaskJSONRPCServer:
    def _thread(self, target, args=None, kwargs=None, forceNative=False):
       if forceNative and self.settings.gevent: #force using NATIVE python threads, insted of coroutines
          import gevent
-         t=gevent._threading.start_new_thread(target, tuple(args or []), kwargs or {})
+         if hasattr(gevent, '_threading'):
+            t=gevent._threading.start_new_thread(target, tuple(args or []), kwargs or {})
+         else:
+            t=threading.Thread(target=target, args=args or [], kwargs=kwargs or {})
+            t.start()
       else:
          self._importThreading(forceDelete=True)
          t=threading.Thread(target=target, args=args or [], kwargs=kwargs or {})
@@ -381,7 +398,7 @@ class flaskJSONRPCServer:
          return self._logger("Cant find parent's module")
       self._parentModule=m
 
-   def _importGlobalsFromParent(self, scope=None, typeOf=[IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, ModuleType, FunctionType]):
+   def _importGlobalsFromParent(self, scope=None, typeOf=None):
       """
       This function import global attrs from parent module (main program) to given scope.
       Imported attrs can be filtered by type.
@@ -391,6 +408,8 @@ class flaskJSONRPCServer:
          self._throw('This method can be called only from <main> process')
       if self._parentModule is None:
          self._throw("Parent module not founded")
+      if typeOf is None:
+         typeOf=[IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, ModuleType, FunctionType]
       try:
          mytime=self._getms()
          scope=scope if scope is not None else {}
@@ -529,7 +548,7 @@ class flaskJSONRPCServer:
       def _fixJSON(o):
          if self._isFunction(self.fixJSON): return self.fixJSON(o)
       mytime=self._getms()
-      s=self.jsonBackend.dumps(data, indent=None, separators=(',',':'), ensure_ascii=True, sort_keys=True, default=_fixJSON)
+      s=self.jsonBackend.dumps(data, indent=None, separators=(',',':'), ensure_ascii=True, sort_keys=False, default=_fixJSON)
       self._speedStatsAdd('serializeJSON', self._getms()-mytime)
       return s
 
@@ -789,20 +808,32 @@ class flaskJSONRPCServer:
          self.processingDispatcherCount-=1
          return False, params, self._getErrorInfo()
 
-   def _compress(self, resp):
+   def _compressResponse(self, resp):
       # provide compression of response
-      mytime=self._getms()
-      from cStringIO import StringIO
-      from gzip import GzipFile
       resp.direct_passthrough=False
-      gzip_buffer=StringIO()
-      with GzipFile(mode='wb', fileobj=gzip_buffer) as f: f.write(resp.data)
-      resp.data=gzip_buffer.getvalue()
+      resp.data=self._compressGZIP(resp.data)
       resp.headers['Content-Encoding']='gzip'
       resp.headers['Vary']='Accept-Encoding'
       resp.headers['Content-Length']=len(resp.data)
-      self._speedStatsAdd('compressResponse', self._getms()-mytime)
       return resp
+
+   def _compressGZIP(self, data):
+      # provide compression
+      mytime=self._getms()
+      gzip_buffer=StringIO()
+      l=len(data)
+      with GzipFile(mode='wb', fileobj=gzip_buffer, compresslevel=3) as f: f.write(data)
+      res=gzip_buffer.getvalue()
+      print '>> compression %s%%, original size %smb'%(round((1-len(res)/float(l))*100.0, 1), round(l/1024.0/1024.0, 2))
+      self._speedStatsAdd('compressResponse', self._getms()-mytime)
+      return res
+
+   def _uncompressGZIP(self, data):
+      mytime=self._getms()
+      gzip_buffer=StringIO(data)
+      with GzipFile('', 'r', 0, gzip_buffer) as f: res=f.read()
+      self._speedStatsAdd('uncompressResponse', self._getms()-mytime)
+      return res
 
    def _copyRequestContext(self, request):
       if self._inChild(): self._throw('This method can be called only from <main> process')
@@ -991,7 +1022,8 @@ class flaskJSONRPCServer:
          return resp
       # with compression
       mytime=self._getms()
-      resp=self._compress(resp)
+      try: resp=self._compressResponse(resp)
+      except Exception, e: print e
       self._logger('COMPRESSION TIME:', round(self._getms()-mytime, 1))
       return resp
 
@@ -1241,7 +1273,7 @@ class execBackend_threaded:
       return r
 
 class execBackend_parallelWithSocket:
-   def __init__(self, poolSize=1, importGlobalsFromParent=True, parentGlobals=None, sleepTime_resultCheck=0.15, sleepTime_emptyQueue=0.3, sleepTime_waitLock=0.75, sleepTime_lazyRequest=2*60*1000, sleepTime_checkPoolStopping=0.3, allowThreads=True, id='execBackend_parallelWithSocket', socketPath=None, saveResult=True, persistent_queueGet=True, useCPickle=False):
+   def __init__(self, poolSize=1, importGlobalsFromParent=True, parentGlobals=None, sleepTime_resultCheck=0.15, sleepTime_emptyQueue=0.1, sleepTime_waitLock=0.75, sleepTime_lazyRequest=2*60*1000, sleepTime_checkPoolStopping=0.3, allowThreads=True, id='execBackend_parallelWithSocket', socketPath=None, saveResult=True, persistent_queueGet=True, useCPickle=False):
       self.settings=magicDict({
          'poolSize':poolSize,
          'sleepTime_resultCheck':sleepTime_resultCheck,
@@ -1266,8 +1298,9 @@ class execBackend_parallelWithSocket:
       self.result={}
       self.socketPath=socketPath
       self._forceStop=False
-      self._jsonBackend='simplejson'
+      self._jsonBackend=None
       if useCPickle:
+         #! try http://stackoverflow.com/a/15108940
          import cPickle
          self._jsonBackend=magicDict({
             'dumps': lambda data, **kwargs: cPickle.dumps(data),
@@ -1280,6 +1313,8 @@ class execBackend_parallelWithSocket:
          server._throw('ExecBackend "parallelWithSocket" not implemented for Flask backend yet')
       # warnings
       if self.settings.useCPickle: server._logger('WARNING: cPickle is slow backend')
+      # choise json-backend
+      if self._jsonBackend is None: self._jsonBackend=server.jsonBackend
       # generate socket-file
       if not self.socketPath:
          self.socketPath='%s/.%s.%s.sock'%(server._getScriptPath(), server._getScriptName(withExt=False), self._id)
@@ -1309,7 +1344,7 @@ class execBackend_parallelWithSocket:
       listener=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
       listener.bind(self.socketPath)
       listener.listen(1)
-      self._server=flaskJSONRPCServer([self.socketPath, listener], blocking=False, cors=False, gevent=server.setts.gevent, debug=False, log=server.settings.log, fallback=False, allowCompress=False, jsonBackend=self._jsonBackend, tweakDescriptors=None, notifBackend='simple', dispatcherBackend='simple')
+      self._server=flaskJSONRPCServer([self.socketPath, listener], blocking=False, cors=False, gevent=server.setts.gevent, debug=False, log=server.settings.log, fallback=False, allowCompress=True, compressMinSize=10*1024*1024, jsonBackend=self._jsonBackend, tweakDescriptors=None, notifBackend='simple', dispatcherBackend='simple', experimental=server.settings.experimental)
       self._server.setts.antifreeze_batchMaxTime=1*1000
       self._server.setts.antifreeze_batchBreak=False
       self._server.setts.antifreeze_batchSleep=1
@@ -1343,15 +1378,16 @@ class execBackend_parallelWithSocket:
       self._server.stop(timeout=timeout-(server._getms()-mytime)/1000.0)
       self._server=None
 
-   def sendRequest(self, path, method, params=[], notif=False):
+   def sendRequest(self, path, method, params=None, notif=False):
       mytime=self._server._getms()
+      if params is None: params=[]
       if self._server._isArray(method): #always like notify-batch
          data=[{'jsonrpc': '2.0', 'method': v['method'], 'params':v['params']} for v in method]
       else:
          data={'jsonrpc': '2.0', 'method': method, 'params':params}
          if not notif: #like notif
             data['id']=int(random.random()*999999)
-      try: data=self._server._serializeJSON(data) #IMPORTANT! _server, not _parentServer, or it will be cycled
+      try: data=self._parentServer._serializeJSON(data)
       except Exception, e:
          self._parentServer._throw('Cant serialize JSON: %s'%(e))
       _conn=self._conn if self._conn is not None else UnixHTTPConnection(self.socketPath)
@@ -1371,12 +1407,8 @@ class execBackend_parallelWithSocket:
             self._parentServer._speedStatsAdd(method, self._server._getms()-mytime)
          return
       if resp.getheader('Content-Encoding', None)=='gzip':
-         mytime2=self._server._getms()
-         from cStringIO import StringIO
-         from gzip import GzipFile
-         data2=GzipFile('', 'r', 0, StringIO(data2)).read()
-         self._parentServer._speedStatsAdd('uncompressResponse', self._server._getms()-mytime2)
-      data2=self._server._parseJSON(data2) #IMPORTANT! _server, not _parentServer, or it will be cycled
+         data2=self._parentServer._uncompressGZIP(data2)
+      data2=self._parentServer._parseJSON(data2)
       if method!='speedStatsAdd':
          self._parentServer._speedStatsAdd(method, self._server._getms()-mytime)
       if not self._server._isDict(data2): return None
@@ -1384,12 +1416,32 @@ class execBackend_parallelWithSocket:
          self._parentServer._throw('Error %s: %s'%(data2['error']['code'], data2['error']['message']))
       return data2.get('result', None)
 
+   def sendRequestEx(self, data, async=False, cb=None, returnAllData=False):
+      # helper
+      def tFunc(self, data, async, cb):
+         data['error']=None
+         try:
+            data['result']=self.sendRequest(data.get('path', '/'), data['method'], data['params'], notif=async)
+         except Exception, e:
+            data['result']=None
+            data['error']=e
+         if self._server._isFunction(cb): cb(data, self)
+         elif data['error']: self._parentServer._throw(data['error'])
+         return (data if returnAllData else data['result'])
+      # process request
+      if async and self._server._isFunction(cb): #fully async with callback
+         if not self.settings.allowThreads:
+            self._parentServer._logger('Fully async request only supported, if allowThreads==True')
+         self._parentServer._thread(tFunc, args=[self, data, False, cb])
+      else: # simple request
+         return tFunc(self, data, async, cb)
+
    def childCicle(self, parentServer):
       self._parentServer=parentServer
       self._conn=None
       self._lazyRequest={}
       self._lazyRequestLatTime=None
-      self._server=flaskJSONRPCServer(['', ''], gevent=parentServer.setts.gevent, log=parentServer.setts.log, jsonBackend=self._jsonBackend, tweakDescriptors=None) #we need this dummy for some methods from it
+      self._server=flaskJSONRPCServer(['', ''], gevent=parentServer.setts.gevent, log=parentServer.setts.log, jsonBackend=self._jsonBackend, tweakDescriptors=None, experimental=parentServer.settings.experimental) #we need this dummy for some methods from it
       if not self.settings.allowThreads:
          # if threads not allowed, we don't need gevent in child
          parentServer.setts.gevent=False
@@ -1466,21 +1518,29 @@ class execBackend_parallelWithSocket:
       # some overloads in _callDispatcher()._connection
       _connection['parallelType']='parallelWithSocket'
       _connection['parallelPoolSize']=self.settings.poolSize
-      _connection['call']['eval']=lambda code, scope=None, async=False: self.sendRequest('/parent', 'eval', [code, scope, False], notif=async)
-      _connection['call']['execute']=lambda code, scope=None, async=False: self.sendRequest('/parent', 'eval', [code, scope, True], notif=async)
-      _connection['call']['copyGlobal']=self.childCopyGlobal
+      # wrap methods for passing "_connection" object
+      _connection['call']['execute']=lambda code, scope=None, wait=True, cb=None: self.childEval(code, scope=scope, wait=wait, cb=cb, isExec=True, _connection=magicDict(_connection))
+      _connection['call']['eval']=lambda code, scope=None, wait=True, cb=None: self.childEval(code, scope=scope, wait=wait, cb=cb, isExec=False, _connection=magicDict(_connection))
+      _connection['call']['copyGlobal']=lambda var, actual=True, cb=None: self.childCopyGlobal(var, actual=actual, cb=cb, _connection=magicDict(_connection))
       return _connection
 
    def childDisableNotImplemented(self):
       # disable none-implemented methods in parentServer
-      whiteList=['_callDispatcher', '_checkFileDescriptor', '_compress', '_copyRequestContext', '_countFileDescriptor', '_fileGet', '_fileWrite', '_fixJSON', '_formatPath', '_getErrorInfo', '_getms', '_getScriptName', '_getScriptPath', '_getServerUrl', '_import', '_importAll', '_importSocket', '_importThreading', '_inChild', '_isArray', '_isDict', '_isFunction', '_isInstance', '_isNum', '_isString', '_logger', '_parseJSON', '_parseRequest', '_prepResponse', '_serializeJSON', '_sha1', '_sha256', '_strGet', '_throw', '_tweakLimit', 'fixJSON', '_sleep', '_thread']
+      whiteList=['_callDispatcher', '_checkFileDescriptor', '_compressResponse', '_compressGZIP', '_uncompressGZIP', '_copyRequestContext', '_countFileDescriptor', '_fileGet', '_fileWrite', '_fixJSON', '_formatPath', '_getErrorInfo', '_getms', '_getScriptName', '_getScriptPath', '_getServerUrl', '_import', '_importAll', '_importSocket', '_importThreading', '_inChild', '_isArray', '_isDict', '_isFunction', '_isInstance', '_isNum', '_isString', '_logger', '_parseJSON', '_parseRequest', '_prepResponse', '_serializeJSON', '_sha1', '_sha256', '_strGet', '_throw', '_tweakLimit', 'fixJSON', '_sleep', '_thread', '_randomEx']
       for name in dir(self._parentServer):
          if not self._parentServer._isFunction(getattr(self._parentServer, name)): continue
          if name not in whiteList:
             s='Method "%s" not implemented in parallel backend'%(name)
             setattr(self._parentServer, name, lambda __msg=s, *args, **kwargs: self._parentServer._throw(__msg))
 
-   def childCopyGlobal(self, var, actual=True, updateGlobals=False):
+   def childEval(self, code, scope=None, wait=True, cb=None, isExec=False, _connection=None):
+      def tFunc(o, self):
+         o['cb'](o['result'], o['error'], _connection)
+      data={'path':'/parent', 'method':'eval', 'params':[code, scope, isExec], 'cb':cb}
+      self.sendRequestEx(data, async=not(wait), cb=(tFunc if self._server._isFunction(cb) else None))
+
+   def childCopyGlobal(self, var, actual=True, cb=None, _connection=None):
+      # if callback passed, method work in async mode
       vars=var if self._server._isArray(var) else [var]
       res={}
       if not actual and self.settings.importGlobalsFromParent:
@@ -1488,27 +1548,40 @@ class execBackend_parallelWithSocket:
          for k in vars:
             res[k]=self.parentGlobals.get(k, None)
             self._server._logger('CopyGlobal var "%s": without checking'%k)
+         if self._server._isFunction(cb):
+            cb((res if self._server._isArray(var) else res.values()[0]), False, _connection)
       else:
          hashs=[self.parentGlobalsMap.get(k, None) for k in vars]
-         tArr=self.sendRequest('/parent', 'varCheck', [hashs, vars, True, updateGlobals])
-         for k, r in tArr.items():
-            if not r[0]: # not changed
-               res[k]=self.parentGlobals.get(k, None)
-               self._server._logger('CopyGlobal var "%s": not changed'%k)
-            elif r[1] is None: # not founded or not hashable
-               res[k]=None
-               if k in self.parentGlobals:
-                  del self.parentGlobalsMap[k]
-                  del self.parentGlobals[k]
-               self._server._logger('CopyGlobal var "%s": not founded or not hashable'%k)
-            else: # changed
-               v=r[2]
-               # need to deseriolize value
-               v=self._server._parseJSON(v)
-               res[k]=v
-               self.parentGlobalsMap[k]=r[1]
-               self.parentGlobals[k]=v
-               self._server._logger('CopyGlobal var "%s": changed'%k)
+         data={'path':'/parent', 'method':'varCheck', 'params':[hashs, vars, True], 'cb':cb, 'onlyOne':not(self._server._isArray(var))}
+         def tFunc(data, self):
+            if data['error']:
+               if self._server._isFunction(data['cb']):
+                  return data['cb'](None, data['error'], _connection)
+               else: self._parentServer._throw(data['error'])
+            res={}
+            for k, r in data['result'].items():
+               if not r[0]: # not changed
+                  res[k]=self.parentGlobals.get(k, None)
+                  self._server._logger('CopyGlobal var "%s": not changed'%k)
+               elif r[1] is None: # not founded or not hashable
+                  res[k]=None
+                  if k in self.parentGlobals:
+                     del self.parentGlobalsMap[k]
+                     del self.parentGlobals[k]
+                  self._server._logger('CopyGlobal var "%s": not founded or not hashable'%k)
+               else: # changed
+                  v=r[2]
+                  # need to deseriolize value
+                  v=self._server._parseJSON(v)
+                  res[k]=v
+                  self.parentGlobalsMap[k]=r[1]
+                  self.parentGlobals[k]=v
+                  self._server._logger('CopyGlobal var "%s": changed'%k)
+            if self._server._isFunction(data['cb']):
+               data['cb']((res if not data['onlyOne'] else res.values()[0]), False, _connection)
+            else: data['result']=res
+         res=self.sendRequestEx(data, async=self._server._isFunction(cb), cb=tFunc)
+         if self._server._isFunction(cb): return
       return (res if self._server._isArray(var) else res.values()[0])
 
    def var2hash(self, var, name, returnSerialized=False):
@@ -1551,7 +1624,7 @@ class execBackend_parallelWithSocket:
          self._parentServer._throw('Access denied') # tokens not match
       return self._parentServer.stats(inMS=inMS)
 
-   def api_parentEval(self, code, scope=None, isExec=False, updateGlobals=False, _connection=None):
+   def api_parentEval(self, code, scope=None, isExec=False, _connection=None):
       if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
          self._server._throw('Access denied') # tokens not match
       # eval code in parent process
@@ -1566,10 +1639,8 @@ class execBackend_parallelWithSocket:
                elif self._server._isString(s): tArr[s]=self.parentGlobals.get(s, None)
             scope=tArr
          if scope is None:
-            if not updateGlobals: scope=self.parentGlobals
-            else:
-               scope={}
-               self._parentServer._importGlobalsFromParent(scope=scope)
+            scope={}
+            self._parentServer._importGlobalsFromParent(scope=scope)
          scope['__server__']=self._parentServer # add server instance to scope
          s=compile(code, '<string>', 'exec' if isExec else 'eval')
          res=eval(s, scope)
@@ -1577,18 +1648,16 @@ class execBackend_parallelWithSocket:
          self._server._throw('Cant execute code: %s'%(e))
       return res
 
-   def api_parentVarCheck(self, hashs, vars, returnIfNotMatch, updateGlobals=False, _connection=None):
+   def api_parentVarCheck(self, hashs, vars, returnIfNotMatch, _connection=None):
       if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
          self._server._throw('Access denied') # tokens not match
       if len(hashs)!=len(vars):
          self._server._throw('Wrong length')
       if not self._server._isArray(hashs) or not self._server._isArray(vars):
          self._server._throw('Arguments "vars" and "hashs" must be array')
-      if not updateGlobals: scope=self.parentGlobals
-      else:
-         scope={}
-         # typeOf=[IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, DictType, ListType, TupleType]
-         self._parentServer._importGlobalsFromParent(scope=scope)
+      scope={}
+      # typeOf=[IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, DictType, ListType, TupleType]
+      self._parentServer._importGlobalsFromParent(scope=scope)
       res={}
       for i, k in enumerate(vars):
          vHash=hashs[i]

@@ -1,54 +1,154 @@
 |PyPI version| |PyPI downloads| |License|
 
 flaskJSONRPCServer
-------------------
+==================
 
-This library is an implementation of the JSON-RPC specification. It supports only 2.0 specification for now, which includes batch submission, keyword arguments, etc.
+This library is an extended implementation of server for JSON-RPC
+protocol. It supports only json-rpc 2.0 specification for now, which
+includes batch submission, keyword arguments, notifications, etc.
 
 Comments, bug reports
 ---------------------
 
-flaskJSONRPCServer resides on **github**. You can file issues or pull requests `there <https://github.com/byaka/flaskJSONRPCServer/issues>`_.
+flaskJSONRPCServer resides on **github**. You can file issues or pull
+requests `there <https://github.com/byaka/flaskJSONRPCServer/issues>`__.
 
 Requirements
 ------------
 
--  Python >=2.6
--  Flask >= 0.10 (not tested with older version)
--  Gevent >= 1.0 (optionally)
+-  **Python2.6** or **Python2.7**
+-  **Flask** >= 0.10 (not tested with older version)
+-  **Gevent** >= 1.0 (optionally, but recommended)
+
+`How to install <#install>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+`About Gevent and async <#gevent-and-async>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+`About hot-reloading <#hot-reloading>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+`Simple example <#examples>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+`Licensing <#license>`__
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 Pros
 ----
 
--  Lib tested over **highload** (>=60 connections per second, 24/7 and it's not simulation) with **Gevent** enabled and no stability issues or memory leak (this is why i'm wrote this library)
+-  Lib ready for **production**, we use it in some products
+-  Lib tested over **"highload"** (over 60 connections per second, 24/7
+   and it's not simulation) with **Gevent** enabled and no stability
+   issues or memory leak (this is why i'm wrote this library)
 -  Auto **CORS**
 -  Simple switching to **Gevent** as backend
--  Auto fallback to **JSONP** on GET requests (for old browsers, that don't support CORS like **IE**\ <10)
--  Dispatchers can simply get info about connection (**IP**, **Cookies**, **Headers**)
--  Dispatchers can simply set **Cookies**, change output **Headers**, change output format for **JSONP** requests
--  Lib can be simply integrated with another **Flask** app on the same IP:PORT
--  Lib can be simply integrated with another **Flask** app on the same IP:PORT
--  Lib fully support **Notification** requests (see example/notify.py)
--  Lib supports **restarting** server (see example/restart.py)
--  Lib supports **hot reloading** of API (see example/reloadAndReplace.py)
--  Lib supports **multiple servers** in one app (see example/multiple.py)
--  Lib supports **merging** with another WSGI app (see example/mergeFlaskApp.py)
+-  Auto fallback to **JSONP** on GET requests (for old browsers, that
+   don't support CORS like **IE**\ <10)
+-  Dispatchers can simply get info about connection (**IP**,
+   **Cookies**, **Headers**)
+-  Dispatchers can simply set **Cookies**, change output **Headers**,
+   change output format for **JSONP** requests
+-  Lib fully support **Notification** requests (see *example/notify.py*)
+-  Lib supports **restarting** server (see *example/restart.py*)
+-  Lib supports **hot-reloading** of API (see *example/hotReload1.py*,
+   *example/hotReload2.py*)
+-  Lib supports **multiple servers** in one app (see
+   *example/multiple.py*)
+-  Lib supports **merging** with another WSGI app on the same IP:PORT
+   (see *example/mergeFlaskApp.py*)
+-  Lib supports different **execution-backends**, for example
+   multiprocessing (see *example/parallelExecuting.py*)
+-  Lib supports **locking** (you can lock all server or specific
+   dispatchers)
+-  Lib supports different **serializing-backends** so you can implement
+   any protocol, not only JSON
+-  Lib supports **individual settings** for different dispatchers. For
+   example one of them can be processed with parallel (multiprocess)
+   backend, other with standard processing
+-  Lib collects self **speed-stats**
 
 Cons
 ----
 
--  No **documentation**, only examples in package (sorry, i not have time for now)
--  Lib not has **decorators**, so it not a "Flask-way" (this can be simply added, but i not use decorators, sorry)
+-  No **documentation**, only examples in package (sorry, i not have
+   time for now)
+-  Lib not has **decorators**, so it not a "Flask-way" (this can be
+   simply added, but i not use decorators, sorry)
 
 Install
 -------
 
 ``pip install flaskJSONRPCServer``
 
+Gevent and async
+----------------
+
+Some server’s methods (like JSON processing or compression) not
+supported greenlets switching while processing. It can be big
+performance problem on highload. I start to implement functionality to
+solve this. Please see `experimental
+package <https://github.com/byaka/flaskJSONRPCServer/blob/with_parallel_executing/flaskJSONRPCServer/experimental/README.md>`__.
+
+Hot-reloading
+-------------
+
+You can overload source of server without stopping.
+
+.. code:: python
+
+    server.reload(data, clearOld=False)
+
+Flag ``<clearOld>`` will remove all earlier existing dispatchers.
+
+This operation safe, if something goes wrong, lib restore previous
+source. While reloading, server stop processing requests, but not reject
+them. Server handle all requests, and when reloading completed, all
+handled requests will be processed. It also wait for completing
+processing requests before start reloading and you can pass
+``<timeout>`` for this waiting. Also you can pass
+``<processingDispatcherCountMax>`` and server will not wait for given
+number of processed requests.
+
+When reloading, you can change source, merge new variables with old and
+many more.
+
+.. code:: python
+
+    data=[
+       {'dispatcher':'testForReload1', 'scriptPath':server._getScriptPath(True), 'isInstance':False,'overload':[{'globalVar1':globalVar1}, callbackForManualOverload], 'path':'/api'}
+    ]
+
+For now overloading supports for any dispatcher or several dispatchers
+separately (you can fully change all dispatcher's settings and of course
+source and variables).
+
+When you reload dispatcher and give path for file (of course it can be
+same file as "main"), this file imported. Then lib overloaded variables
+and attributes you give and replace old dispatcher with new from this
+module. If you give one path for several dispatchers, they all work in
+one imported file (in this case file will import one time only, not for
+every dispatcher).
+
+If you need to overload some objects, that not dispatchers but used in
+them, you simply can do this with callback.
+
+.. code:: python
+
+    def callbackForManualOverload(server, module, dispatcher):
+       # overload globals also
+       for k in dir(module):
+          globals()[k]=getattr(module, k)
+
+This code overload all global variables and replace them with variables
+from just imported file. In future i add simple method for reloading all
+source of server.
+
 Examples
 --------
 
-Simple server
+Simple server. More examples you can find in directory *example/*
 
 .. code:: python
 
@@ -56,10 +156,10 @@ Simple server
     from flaskJSONRPCServer import flaskJSONRPCServer
 
     class mySharedMethods:
-       def random(self, mult=65536):
+       def random(self):
           # Sipmly return random value (0..mult)
-          return int(random.random()*mult)
-          
+          return int(random.random()*65536)
+
     class mySharedMethods2:
        def random(self):
           # Sipmly return random value (0..mult)
@@ -68,6 +168,7 @@ Simple server
     def echo(data='Hello world!'):
        # Simply echo
        return data
+    echo._alias='helloworld' #setting alias for method
 
     def myip(_connection=None):
        # Return client's IP
@@ -75,7 +176,8 @@ Simple server
 
     def setcookie(_connection=None):
        # Set cookie to client
-       _connection.cookiesOut.append({'name':'myTestCookie', 'value':'Your IP is %s'%_connection.ip})
+       print _connection.cookies
+       _connection.cookiesOut.append({'name':'myTestCookie', 'value':'Your IP is %s'%_connection.ip, 'domain':'byaka.name'})
        return 'Setted'
 
     def stats(_connection=None):
@@ -83,13 +185,16 @@ Simple server
        return _connection.server.stats(inMS=True) #inMS=True return stats in milliseconds
 
     def big(_connection=None):
-       _connection.allowCompress=True #allow compression for this method
+       _connection.allowCompress=True #allow compression for this method only
        s="""
     ... large data here ...
        """
        return s
 
+    big._alias=['bigdata', 'compressed'] #setting alias for method
+
     if __name__=='__main__':
+       print 'Running api..'
        # Creating instance of server
        #    <blocking>         switch server to sync mode when <gevent> is False
        #    <cors>             switch auto CORS support
@@ -123,7 +228,7 @@ License
 -------
 
 It is licensed under the Apache License, Version 2.0
-(`read <http://www.apache.org/licenses/LICENSE-2.0.html>`_).
+(`read <http://www.apache.org/licenses/LICENSE-2.0.html>`__).
 
 .. |PyPI version| image:: https://img.shields.io/pypi/v/flaskJSONRPCServer.svg
    :target: https://pypi.python.org/pypi/flaskJSONRPCServer

@@ -11,7 +11,11 @@ def restart(_connection=None):
    needRestart=True
 
 testVar=1
-testFunc=lambda s: '__%s__'%s
+def testFunc(s):
+   import gevent
+   gevent.sleep(1)
+   return '__%s__'%s
+
 def testScope(_connection=None):
    # original "testVar"
    print '"testVar" in global scope:', _connection.call.eval('testFunc(testVar)')
@@ -27,6 +31,13 @@ def testScope(_connection=None):
 
    # overloaded "testVar" and imported testFunc() from globals()
    print '"testVar" in passed scope with imported:', _connection.call.eval('testFunc(testVar)', scope=[{'testVar':2}, 'testFunc'])
+
+def testEvalCB(async=True, _connection=None):
+   def tFunc1(res, err, _connection):
+      print '> From eval-callback', res, err
+   _connection.call.eval('testFunc(testVar)', cb=tFunc1, wait=not(async))
+   print '> After eval'
+   return 'ok'
 
 def test1(_connection=None):
    _connection.server.lock()
@@ -57,7 +68,7 @@ testCopyGlobal=[]
 def testCopyGlobal_proc(_connection=None):
    # get data from global variable
    if _connection.get('parallelType', False):
-      tArr=_connection.call.copyGlobal('testCopyGlobal', actual=True, updateGlobals=True)
+      tArr=_connection.call.copyGlobal('testCopyGlobal', actual=True)
    else: tArr=testCopyGlobal
    # here we slowly process this data
    sMax=max(tArr)
@@ -73,42 +84,51 @@ def testCopyGlobal_proc(_connection=None):
 def testCopyGlobal_gen(_connection=None):
    # generate random data
    global testCopyGlobal
-   testCopyGlobal=[round((random.random()+0.01)*99, 2) for i in xrange(1*10**6)]
+   testCopyGlobal=None
+   testCopyGlobal=[round((random.random()+0.01)*99, 2) for i in xrange(5*10**6)]
+
+def testCopyGlobal_async(_connection=None):
+   # get data from global variable, but don't wait for completion (passing cb switch to async mode)
+   def tFunc(res, err, _connection):
+      print '> From copyGlobal-callback', err, len(res)
+   _connection.call.copyGlobal('testCopyGlobal', actual=True, cb=tFunc)
+   print '> After copyGlobal'
+   return 'ok'
 
 def echo(data='Hello world', _connection=None):
    return data
 
 sexy_speedStats={}
 def sexyNum(n=None, _connection=None):
-   # for parallel backend
+   # find sexy=prime numbers and return stats about early founded
    if n is None: n=random.randint(25000, 35000)
    mytime=_connection.server._getms()
    tArr=sexyPrime.sexy_primes(n)
    mytime=round((_connection.server._getms()-mytime)/1000.0, 1)
-   if _connection.get('parallelType', False):
+   if _connection.get('parallelType', False): # in parallel backend, need to access parent's memory
       _connection.call.execute('if %(n)s not in sexy_speedStats: sexy_speedStats[%(n)s]=[]\nsexy_speedStats[%(n)s].append(%(t)s)'%({'n':n, 't':mytime}))
-   else:
+   else: # in simple backend, variable in our globals
       if n not in sexy_speedStats: sexy_speedStats[n]=[]
       sexy_speedStats[n].append(mytime)
    # find nearest settings
    near=[]
-   if _connection.get('parallelType', False):
+   if _connection.get('parallelType', False): # in parallel backend, need to access parent's memory
       if _connection.call.eval('len(sexy_speedStats[%s])'%n)>1: near=['same', n]
-   else:
+   else: # in simple backend, variable in our globals
       if len(sexy_speedStats[n])>1: near=['same', n]
    if not len(near):
-      if _connection.get('parallelType', False):
+      if _connection.get('parallelType', False): # in parallel backend, need to access parent's memory
          tArr1=_connection.call.eval('sorted([s for s in sexy_speedStats.keys() if s!=%s])'%n)
-      else:
+      else: # in simple backend, variable in our globals
          tArr1=sorted([s for s in sexy_speedStats.keys() if s!=n])
       for i, s in enumerate(tArr1):
          if i<len(tArr1)-1 and s<n and tArr1[i+1]>n:
             near=['nearest', s if(n-s<n-tArr1[i+1]) else tArr1[i+1]]
             break
    if len(near):
-      if _connection.get('parallelType', False):
+      if _connection.get('parallelType', False): # in parallel backend, need to access parent's memory
          s=_connection.call.eval('round(sum(sexy_speedStats[%(s)s])/len(sexy_speedStats[%(s)s]), 1)'%({'s':near[1]}))
-      else:
+      else: # in simple backend, variable in our globals
          s=round(sum(sexy_speedStats[near[1]])/len(sexy_speedStats[near[1]]), 1)
       near='For %s settings average speed %s seconds'%(near[0], s)
    else: near='No nearest results'
@@ -132,7 +152,13 @@ if __name__=='__main__':
    #    <tweakDescriptors> set descriptor's limit for server
    #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
    #    <notifBackend>     set backend for Notify-requests
-   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', tweakDescriptors=[1000, 1000], dispatcherBackend='parallelWithSocket', notifBackend='simple')
+   import ujson
+   from flaskJSONRPCServer import magicDict
+   jsonBackend=magicDict({
+      'dumps': lambda data, **kwargs: ujson.dumps(data),
+      'loads': lambda data, **kwargs: ujson.loads(data)
+   })
+   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', tweakDescriptors=[1000, 1000], dispatcherBackend='parallelWithSocket', notifBackend='simple', experimental=True)
    # Register dispatchers for single functions
    server.registerFunction(stats, path='/api', dispatcherBackend='simple')
    server.registerFunction(test1, path='/api')
@@ -141,16 +167,19 @@ if __name__=='__main__':
    server.registerFunction(test4, path='/api')
 
    server.registerFunction(testScope, path='/api')
+   server.registerFunction(testEvalCB, path='/api')
 
    server.registerFunction(echo, path='/api')
+   server.registerFunction(echo, path='/api', dispatcherBackend='simple', name='echo2')
 
    server.registerFunction(sexyNum, path='/api')
    server.registerFunction(sexyNum, path='/api', dispatcherBackend='simple', name='sexyNum2')
 
    server.registerFunction(restart, path='/api', dispatcherBackend='simple')
 
-   server.registerFunction(testCopyGlobal_proc, path='/api')
    server.registerFunction(testCopyGlobal_gen, path='/api', dispatcherBackend='simple')
+   server.registerFunction(testCopyGlobal_proc, path='/api')
+   server.registerFunction(testCopyGlobal_async, path='/api')
 
    # Run server
    server.start()
