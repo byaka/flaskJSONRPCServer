@@ -861,6 +861,15 @@ class flaskJSONRPCServer:
 
    def _requestHandler(self, path, method=None):
       if self._inChild(): self._throw('This method can be called only from <main> process')
+      try:
+         res=self._requestProcess(path, method)
+         return res
+      except Exception:
+         self._logger('ERROR processing request: %s'%(self._getErrorInfo()))
+         return Response(status=500)
+
+   def _requestProcess(self, path, method):
+      if self._inChild(): self._throw('This method can be called only from <main> process')
       # DeepLock
       self._deepWait()
       # calculate connections per second
