@@ -25,7 +25,7 @@ __version__ = "%d.%d.%d%s" % (__ver_major__, __ver_minor__, __ver_patch__, __ver
    limitations under the License.
 """
 
-import sys, inspect, decimal, random, json, datetime, time, resource, os, zipfile, imp, urllib2, hashlib, threading
+import sys, inspect, decimal, random, json, datetime, time, resource, os, zipfile, imp, urllib2, hashlib, threading, gc
 from types import InstanceType, IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, ModuleType, FunctionType
 from cStringIO import StringIO
 from gzip import GzipFile
@@ -33,12 +33,12 @@ Flask=None
 request=None
 Response=None
 
-from utils import UnixHTTPConnection, magicDict
+from utils import UnixHTTPConnection, magicDict, virtVar
 
 try:
    import experimental as experimentalPack
    experimentalPack.initGlobal(globals())
-except ImportError, e: print 'EXPERIMENTAL package not founded', e
+except ImportError, e: print 'EXPERIMENTAL not loaded:', e
 
 class flaskJSONRPCServer:
    """
@@ -57,7 +57,7 @@ class flaskJSONRPCServer:
       :param str|dict|func notifBackend: Select Notif-backend for processing notify-requests. Lib include blocking backend ('simple') and non-blocking backend ('threadPool'). ThreadPool backend automatically switching to coroutines if gevent used. If this parameter 'dict' type, it must contain 'add' key as function. This function be called on notify-request. Optionally it can contain 'init' key as function and be called when server starting. If this parameter 'func' type, it will used like 'add'.
    """
 
-   def __init__(self, bindAdress, blocking=False, cors=False, gevent=False, debug=False, log=True, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=2*1024*1024, jsonBackend='simplejson', notifBackend='simple', dispatcherBackend='simple', auth=None, experimental=False):
+   def __init__(self, bindAdress, blocking=False, cors=False, gevent=False, debug=False, log=True, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=2*1024*1024, jsonBackend='simplejson', notifBackend='simple', dispatcherBackend='simple', auth=None, experimental=False, controlGC=True):
       self.consoleColor=magicDict({'header':'\033[95m', 'okblue':'\033[94m', 'okgreen':'\033[92m', 'warning':'\033[93m', 'fail':'\033[91m', 'end':'\033[0m', 'bold':'\033[1m', 'underline':'\033[4m'})
       # Flask imported here for avoiding error in setup.py if Flask not installed yet
       global Flask, request, Response
@@ -88,7 +88,11 @@ class flaskJSONRPCServer:
          'antifreeze_batchSleep':1,
          'antifreeze_batchBreak':False,
          'auth':auth,
-         'experimental':experimental
+         'experimental':experimental,
+         'controlGC':controlGC,
+         'controlGC_everySeconds':10*60, #every 10 minutes
+         'controlGC_everyRequestCount':50*1000, #every 50k requests
+         'controlGC_everyDispatcherCount':10*1000 #every 10k dispatcher's calls
       })
       self.setts=self.settings # backward compatible
       self.locked=False
@@ -97,6 +101,7 @@ class flaskJSONRPCServer:
       self._findParentModule()
       self._werkzeugStopToken=''
       self._reloadBackup={}
+      self._gcStats=magicDict({'lastTime':0, 'processedRequestCount':0, 'processedDispatcherCount':0})
       self.deepLocked=False
       self.processingRequestCount=0
       self.processingDispatcherCount=0
@@ -132,6 +137,8 @@ class flaskJSONRPCServer:
          if testVal_o!=testVal_c:
             self._throw('values not match (%s, %s)'%(testVal_o, testVal_c))
       except Exception, e: self._throw('Unsupported JSONBackend %s: %s'%(jsonBackend, e))
+      # enable GC manual control
+      if self.settings.controlGC: self._controlGC()
 
    def _registerExecBackend(self, execBackend, notif):
       if self._inChild(): self._throw('This method can be called only from <main> process')
@@ -220,9 +227,10 @@ class flaskJSONRPCServer:
                resource.setrlimit(resource.RLIMIT_OFILE, descriptors)
          except: pass
 
-   def _countFileDescriptor(self):
+   def _countFileDescriptor(self, pid=None):
+      """Count used file descriptors by process"""
       mytime=self._getms()
-      pid=os.getpid()
+      pid=os.getpid() if pid is None else pid
       try:
          c=len([s for s in os.listdir('/proc/%s/fd'%pid)])
          self._speedStatsAdd('countFileDescriptor', self._getms()-mytime)
@@ -231,6 +239,27 @@ class flaskJSONRPCServer:
          self._speedStatsAdd('countFileDescriptor', self._getms()-mytime)
          self._logger("Can't count File Descriptor for PID %s: %s"%(pid, e))
          return None
+
+   def _countMemory(self, pid=None):
+      """Count used memory by process in kilobytes"""
+      mytime=self._getms()
+      pid=os.getpid() if pid is None else pid
+      data=None
+      res=magicDict({})
+      try:
+         data=open('/proc/%s/status'%pid)
+         for s in data:
+            parts=s.split()
+            key=parts[0][2:-1].lower()
+            if key=='peak': res['peak']=int(parts[1])
+            elif key=='rss': res['now']=int(parts[1])
+      except Exception, e:
+         self._logger("Can't count memory for PID %s: %s"%(pid, e))
+         res=None
+      finally:
+         if data is not None: data.close()
+      self._speedStatsAdd('countMemory', self._getms()-mytime)
+      return res
 
    def _checkFileDescriptor(self, multiply=1.0):
       limit=None
@@ -249,7 +278,6 @@ class flaskJSONRPCServer:
       return self._pid!=os.getpid()
 
    def _getms(self, inMS=True):
-      # return time.time()*1000.0
       if inMS: return time.time()*1000.0
       else: return int(time.time())
 
@@ -761,6 +789,7 @@ class flaskJSONRPCServer:
    def _callDispatcher(self, uniqueId, path, data, request, isJSONP=False, nativeThread=None, overload=None):
       try:
          self.processingDispatcherCount+=1
+         self._gcStats.processedDispatcherCount+=1
          _sleep=lambda s, forceNative=nativeThread: self._sleep(s, forceNative=forceNative)
          params={}
          dispatcher=self.routes[path][data['method']].link
@@ -778,6 +807,7 @@ class flaskJSONRPCServer:
                'headersOut':{},
                'uniqueId':uniqueId,
                'jsonp':isJSONP,
+               'mimeType':self._calcMimeType(request),
                'allowCompress':self.setts.allowCompress,
                'server':self,
                'call':magicDict({
@@ -805,10 +835,39 @@ class flaskJSONRPCServer:
          result=dispatcher(**params)
          self._speedStatsAdd('callDispatcher', self._getms()-mytime)
          self.processingDispatcherCount-=1
+         if self.settings.controlGC: self._controlGC() # call GC manually
          return True, params, result
       except Exception:
          self.processingDispatcherCount-=1
+         if self.settings.controlGC: self._controlGC() # call GC manually
          return False, params, self._getErrorInfo()
+
+   def _controlGC(self, force=False):
+      if gc.isenabled() and self.settings.controlGC:
+         gc.disable()
+         self._logger('GC disabled by manual control')
+         self._gcStats.lastTime=self._getms(False)
+         self._gcStats.processedRequestCount=0
+         self._gcStats.processedDispatcherCount=0
+         if not force: return
+      # check
+      m1=self._countMemory()
+      mytime=self._getms(False)
+      if not force:
+         if not self._gcStats.lastTime: return
+         if mytime-self._gcStats.lastTime<self.settings.controlGC_everySeconds and \
+            self._gcStats.processedRequestCount<self.settings.controlGC_everyRequestCount and \
+            self._gcStats.processedDispatcherCount<self.settings.controlGC_everyDispatcherCount: return
+      # collect garbage and reset stats
+      mytime=self._getms()
+      s=gc.collect()
+      m2=self._countMemory()
+      print 'Collected %s, memore freed %smb, used %smb, peak %smb'%(s, round((m1.now-m2.now)/1024.0, 1), round(m2.now/1024.0, 1), round(m2.peak/1024.0, 1))
+      self._logger('GC executed manually: collected %s objects, memore freed %smb, used %smb, peak %smb'%(s, round((m1.now-m2.now)/1024.0, 1), round(m2.now/1024.0, 1), round(m2.peak/1024.0, 1)))
+      self._speedStatsAdd('controlGC', self._getms()-mytime)
+      self._gcStats.lastTime=self._getms(False)
+      self._gcStats.processedRequestCount=0
+      self._gcStats.processedDispatcherCount=0
 
    def _compressResponse(self, resp):
       # provide compression of response
@@ -859,14 +918,20 @@ class flaskJSONRPCServer:
       })
       return r
 
+   def _calcMimeType(self, request):
+      s=('text/javascript' if request.method=='GET' else 'application/json')
+      return s
+
    def _requestHandler(self, path, method=None):
       if self._inChild(): self._throw('This method can be called only from <main> process')
       try:
          res=self._requestProcess(path, method)
+         if self.settings.controlGC: self._controlGC() # call GC manually
          return res
       except Exception:
          s=self._getErrorInfo()
          self._logger('ERROR processing request: %s'%(s))
+         if self.settings.controlGC: self._controlGC() # call GC manually
          return Response(status=500, response=s)
 
    def _requestProcess(self, path, method):
@@ -891,6 +956,7 @@ class flaskJSONRPCServer:
          return Response(status=404)
       # start processing request
       self.processingRequestCount+=1
+      self._gcStats.processedRequestCount+=1
       error=[]
       out=[]
       outHeaders={}
@@ -898,6 +964,7 @@ class flaskJSONRPCServer:
       dataOut=[]
       mytime=self._getms()
       allowCompress=self.setts.allowCompress
+      mimeType=self._calcMimeType(request)
       self._logger('RAW_REQUEST:', request.url, request.method, request.get_data())
       if self._isFunction(self.settings.auth):
          if self.settings.auth(self, path, self._copyRequestContext(request), method) is not True:
@@ -964,6 +1031,7 @@ class flaskJSONRPCServer:
                            outCookies+=params['_connection'].cookiesOut
                            if self.setts.allowCompress and params['_connection'].allowCompress is False: allowCompress=False
                            elif self.setts.allowCompress is False and params['_connection'].allowCompress: allowCompress=True
+                           mimeType=params['_connection'].mimeType
                         out.append({"id":dataIn['id'], "data":result})
                      else:
                         error.append({"code": 500, "message": result, "id":dataIn['id']})
@@ -1015,6 +1083,7 @@ class flaskJSONRPCServer:
                   jsonpCB=params['_connection'].jsonp
                   if self.setts.allowCompress and params['_connection'].allowCompress is False: allowCompress=False
                   elif self.setts.allowCompress is False and params['_connection'].allowCompress: allowCompress=True
+                  mimeType=params['_connection'].mimeType
                out.append({'jsonpCB':jsonpCB, 'data':result})
             else:
                out.append({'jsonpCB':jsonpCB, 'data':result})
@@ -1025,7 +1094,7 @@ class flaskJSONRPCServer:
             dataOut=self._serializeJSON(out[0]['data'])
             dataOut=out[0]['jsonpCB']%(dataOut)
       self._logger('RESPONSE:', dataOut)
-      resp=Response(response=dataOut, status=200, mimetype=('text/javascript' if request.method=='GET' else 'application/json'))
+      resp=Response(response=dataOut, status=200, mimetype=mimeType)
       for hk, hv in outHeaders.items(): resp.headers[hk]=hv
       for c in outCookies:
          try: resp.set_cookie(c.get('name', ''), c.get('value', ''), expires=c.get('expires', 2147483647), domain=c.get('domain', '*'))
@@ -1045,16 +1114,17 @@ class flaskJSONRPCServer:
 
    def serveForever(self, restartOn=False, sleep=10):
       if self._inChild(): self._throw('This method can be called only from <main> process')
-      if not restartOn: self.start(joinLoop=True)
+      if not restartOn and not self.settings.controlGC: self.start(joinLoop=True)
       else:
          restartOn=restartOn if self._isArray(restartOn) else [restartOn]
          self.start(joinLoop=False)
          while True:
             self._sleep(sleep)
+            if self.settings.controlGC: self._controlGC() # call GC manually
             for cb in restartOn:
                if self._isFunction(cb) and cb(self) is not True: continue
                elif cb=='checkFileDescriptor' and not self._checkFileDescriptor(multiply=1.25): continue
-               self.restart()
+               self.restart(joinLoop=False)
                break
 
    def _startExecBackends(self):
@@ -1172,12 +1242,12 @@ class flaskJSONRPCServer:
       self.processingRequestCount=0
       self._deepUnlock()
 
-   def restart(self, timeout=20, processingDispatcherCountMax=0, werkzeugTimeout=3):
+   def restart(self, timeout=20, processingDispatcherCountMax=0, werkzeugTimeout=3, joinLoop=False):
       if self._inChild(): self._throw('This method can be called only from <main> process')
       self.stop(timeout=timeout, processingDispatcherCountMax=processingDispatcherCountMax)
       if not self.setts.gevent: #! Without this werkzeug throw "adress already in use"
          self._sleep(werkzeugTimeout)
-      self.start()
+      self.start(joinLoop=joinLoop)
 
    # def createSSLTunnel(self, port_https, port_http, sslCert='', sslKey='', stunnel_configPath='/home/sslCert/', stunnel_exec='stunnel4', stunnel_configSample=None, stunnel_sslAllow='all', stunnel_sslOptions='-NO_SSLv2 -NO_SSLv3', stunnel_logLevel=4, stunnel_logFile='/home/python/logs/stunnel_%s.log'):
    #    import atexit, subprocess
@@ -1514,9 +1584,10 @@ class execBackend_parallelWithSocket:
       if not self.settings.saveResult: return
       # prepare for pickle
       #! #57 It must be on TYPE-based, not NAME-based
-      convWhitelist=['cookies', 'cookiesOut', 'ip', 'notify', 'jsonp', 'path', 'parallelType', 'parallelPoolSize', 'headersOut', 'dispatcherName', 'headers', 'nativeThread', 'allowCompress']
+      convBlackList=['server', 'call', 'dispatcher']
+      # convWhitelist=['cookies', 'cookiesOut', 'ip', 'notify', 'jsonp', 'path', 'parallelType', 'parallelPoolSize', 'headersOut', 'dispatcherName', 'headers', 'nativeThread', 'allowCompress']
       if '_connection' in params:
-         params['_connection']=dict([(k,v) for k,v in params['_connection'].items() if k in convWhitelist])
+         params['_connection']=dict([(k,v) for k,v in params['_connection'].items() if k not in convBlackList])
       self.sendRequest('/queue', 'result', [p['uniqueId'], status, params, result])
 
    def childWait(self, dispatcher=None, sleepMethod=None, returnStatus=False):
@@ -1547,7 +1618,7 @@ class execBackend_parallelWithSocket:
 
    def childDisableNotImplemented(self):
       # disable none-implemented methods in parentServer
-      whiteList=['_callDispatcher', '_checkFileDescriptor', '_compressResponse', '_compressGZIP', '_uncompressGZIP', '_copyRequestContext', '_countFileDescriptor', '_fileGet', '_fileWrite', '_fixJSON', '_formatPath', '_getErrorInfo', '_getms', '_getScriptName', '_getScriptPath', '_getServerUrl', '_import', '_importAll', '_importSocket', '_importThreading', '_inChild', '_isArray', '_isDict', '_isFunction', '_isInstance', '_isNum', '_isString', '_logger', '_parseJSON', '_parseRequest', '_prepResponse', '_serializeJSON', '_sha1', '_sha256', '_strGet', '_throw', '_tweakLimit', 'fixJSON', '_sleep', '_thread', '_randomEx']
+      whiteList=['_callDispatcher', '_checkFileDescriptor', '_compressResponse', '_compressGZIP', '_uncompressGZIP', '_copyRequestContext', '_countFileDescriptor', '_fileGet', '_fileWrite', '_fixJSON', '_formatPath', '_getErrorInfo', '_getms', '_getScriptName', '_getScriptPath', '_getServerUrl', '_import', '_importAll', '_importSocket', '_importThreading', '_inChild', '_isArray', '_isDict', '_isFunction', '_isInstance', '_isNum', '_isString', '_logger', '_parseJSON', '_parseRequest', '_prepResponse', '_serializeJSON', '_sha1', '_sha256', '_strGet', '_throw', '_tweakLimit', 'fixJSON', '_sleep', '_thread', '_randomEx', '_controlGC', '_countMemory', '_calcMimeType']
       for name in dir(self._parentServer):
          if not self._parentServer._isFunction(getattr(self._parentServer, name)): continue
          if name not in whiteList:
@@ -1604,6 +1675,31 @@ class execBackend_parallelWithSocket:
          res=self.sendRequestEx(data, async=self._server._isFunction(cb), cb=tFunc)
          if self._server._isFunction(cb): return
       return (res if self._server._isArray(var) else res.values()[0])
+
+   def childRemoteVar(self, name, default=None, clear=False):
+      val=default
+      if clear: #непроверяя устанавливаем на сервере в значение default
+         pass
+      else: #проверяем значение на сервере. если переменной нет, устанавливаем значение в default
+         pass
+      #prepare callbacks
+      def tFunc_get(w, k):
+         if k not in ('_val', '_type'):
+            print '!! Unknown property', k
+            return
+         pass
+      def tFunc_set(w, k, v):
+         if k not in ('_val', '_type'):
+            print '!! Unknown property', k
+            return
+         pass
+      #prepare var's wrapper
+      v=virtVar(val, saveObj=False, cbGet=tFunc_get, cbSet=tFunc_set)
+      v._getattrWhitemap+=['_oldType', '_oldHash', '_oldVal']
+      v._oldVal=val
+      v._oldType=type(val)
+      v._oldHash=self.var2hash(val, name)
+      return v
 
    def var2hash(self, var, name, returnSerialized=False):
       try:

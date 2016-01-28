@@ -67,7 +67,7 @@ class moreAsync:
 
    def newMethod(self, cId, data, size):
       try:
-         print '>>>>>>MOREASYNC %s start <%s>, size %smb'%(self.method, cId, round(size/1024.0/1024.0, 2))
+         # print '>>>>>>MOREASYNC %s start <%s>, size %smb'%(self.method, cId, round(size/1024.0/1024.0, 2))
          mytime=self.server._getms()
          if self.server._isFunction(self._newMethod):
             self.result[cId]=self._newMethod(data, self)
@@ -75,7 +75,7 @@ class moreAsync:
             self.result[cId]=self.server._moreAsync_backup[self.method](data)
          speed=self.server._getms()-mytime
          self.speedStats[round(size/1024.0/1024.0)]=speed
-         print '>>>>>>MOREASYNC %s end <%s>, time %ss'%(self.method, cId, round(speed/1000.0, 1))
+         # print '>>>>>>MOREASYNC %s end <%s>, time %ss'%(self.method, cId, round(speed/1000.0, 1))
       except Exception, e:
          self.server._throw('MOREASYNC_ERROR %s: %s'%(self.method, e))
 
@@ -367,20 +367,20 @@ def _patchServer(server):
       def tFunc_dumps(data, server=server, **kwargs):
          size=sys.getsizeof(data)
          if size is not None and size<1*1024*1024: return server._asyncJSON_backup.dumps(data)
-         print '>>>>>>ASYNCJSON dumps start, size %smb'%(round(size/1024.0/1024.0, 2))
+         # print '>>>>>>ASYNCJSON dumps start, size %smb'%(round(size/1024.0/1024.0, 2))
          mytime=server._getms()
          res=asyncJSON_dumps(data, maxProcessTime=0.1, cb=lambda *args:server._sleep(0.001))
          speed=server._getms()-mytime
-         print '>>>>>>ASYNCJSON dumps end, time %ss'%(round(speed/1000.0, 1))
+         # print '>>>>>>ASYNCJSON dumps end, time %ss'%(round(speed/1000.0, 1))
          return res
       def tFunc_loads(data, server=server, **kwargs):
          size=sys.getsizeof(data)
          if size is not None and size<10*1024*1024: return server._asyncJSON_backup.loads(data)
-         print '>>>>>>ASYNCJSON loads start, size %smb'%(round(size/1024.0/1024.0, 2))
+         # print '>>>>>>ASYNCJSON loads start, size %smb'%(round(size/1024.0/1024.0, 2))
          mytime=server._getms()
          res=asyncJSON_loads(data, maxProcessTime=0.1, cb=lambda:server._sleep(0.001))
          speed=server._getms()-mytime
-         print '>>>>>>ASYNCJSON loads end, time %ss'%(round(speed/1000.0, 1))
+         # print '>>>>>>ASYNCJSON loads end, time %ss'%(round(speed/1000.0, 1))
          return res
       server.jsonBackend=magicDict({
          'dumps': tFunc_dumps,
