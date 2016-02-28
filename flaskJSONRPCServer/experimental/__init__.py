@@ -395,8 +395,8 @@ def initLocal(scope, server):
 
 def initGlobal(scope):
    global msgShowed
-   if not msgShowed: print 'EXPERIMENTAL futures used'
-   msgShowed=True
+   # if not msgShowed: print 'EXPERIMENTAL futures used'
+   # msgShowed=True
    pass
 
 if __name__=='__main__':

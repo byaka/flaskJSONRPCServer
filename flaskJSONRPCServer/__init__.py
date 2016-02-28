@@ -4,15 +4,15 @@ __ver_major__ = 0
 __ver_minor__ = 5
 __ver_patch__ = 2
 __ver_sub__ = "with_parallel_executing"
-__version__ = "%d.%d.%d%s" % (__ver_major__, __ver_minor__, __ver_patch__, __ver_sub__)
+__version__ = "%d.%d.%d" % (__ver_major__, __ver_minor__, __ver_patch__)
 """
-:authors: Jhon Byaka
-:copyright: Copyright 2015, Buber
+:authors: John Byaka
+:copyright: Copyright 2016, Buber
 :license: Apache License 2.0
 
 :license:
 
-   Copyright 2015 Buber
+   Copyright 2016 Buber
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@ __version__ = "%d.%d.%d%s" % (__ver_major__, __ver_minor__, __ver_patch__, __ver
    limitations under the License.
 """
 
-import sys, inspect, decimal, random, json, datetime, time, resource, os, zipfile, imp, urllib2, hashlib, threading, gc
+import sys, inspect, decimal, random, json, datetime, time, os, zipfile, imp, urllib2, hashlib, threading, gc
 from types import InstanceType, IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, ModuleType, FunctionType
 from cStringIO import StringIO
 from gzip import GzipFile
@@ -57,7 +57,7 @@ class flaskJSONRPCServer:
       :param str|dict|func notifBackend: Select Notif-backend for processing notify-requests. Lib include blocking backend ('simple') and non-blocking backend ('threadPool'). ThreadPool backend automatically switching to coroutines if gevent used. If this parameter 'dict' type, it must contain 'add' key as function. This function be called on notify-request. Optionally it can contain 'init' key as function and be called when server starting. If this parameter 'func' type, it will used like 'add'.
    """
 
-   def __init__(self, bindAdress, blocking=False, cors=False, gevent=False, debug=False, log=True, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=2*1024*1024, jsonBackend='simplejson', notifBackend='simple', dispatcherBackend='simple', auth=None, experimental=False, controlGC=True):
+   def __init__(self, bindAdress, blocking=False, cors=False, gevent=False, debug=False, log=True, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=2*1024*1024, jsonBackend='simplejson', notifBackend='simple', dispatcherBackend='simple', auth=None, experimental=False, controlGC=True, magicVarForDispatcher='_connection'):
       self.consoleColor=magicDict({'header':'\033[95m', 'okblue':'\033[94m', 'okgreen':'\033[92m', 'warning':'\033[93m', 'fail':'\033[91m', 'end':'\033[0m', 'bold':'\033[1m', 'underline':'\033[4m'})
       # Flask imported here for avoiding error in setup.py if Flask not installed yet
       global Flask, request, Response
@@ -84,15 +84,16 @@ class flaskJSONRPCServer:
          'sleepTime_checkProcessingCount':0.3,
          'sleepTime_waitLock':0.1,
          'sleepTime_waitDeepLock':0.1,
-         'antifreeze_batchMaxTime':2*1000,
-         'antifreeze_batchSleep':1,
+         'antifreeze_batchMaxTime':0.5*1000,
+         'antifreeze_batchSleep':0.5,
          'antifreeze_batchBreak':False,
          'auth':auth,
          'experimental':experimental,
          'controlGC':controlGC,
-         'controlGC_everySeconds':10*60, #every 10 minutes
-         'controlGC_everyRequestCount':50*1000, #every 50k requests
-         'controlGC_everyDispatcherCount':10*1000 #every 10k dispatcher's calls
+         'controlGC_everySeconds':60*60, #every 60 minutes
+         'controlGC_everyRequestCount':300*1000, #every 300k requests
+         'controlGC_everyDispatcherCount':50*1000, #every 50k dispatcher's calls
+         'magicVarForDispatcher':magicVarForDispatcher
       })
       self.setts=self.settings # backward compatible
       self.locked=False
@@ -217,6 +218,11 @@ class flaskJSONRPCServer:
 
    def _tweakLimit(self, descriptors=(65536, 65536)):
       """ Tweak ulimit for more file descriptors """
+      try:
+         import resource
+      except ImportError:
+         self._logger('WARNING: tweaking file descriptors limit not supported on your platform')
+         return None
       if descriptors:
          try: #for Linux
             if resource.getrlimit(resource.RLIMIT_NOFILE)!=descriptors:
@@ -262,10 +268,17 @@ class flaskJSONRPCServer:
       return res
 
    def _checkFileDescriptor(self, multiply=1.0):
+      try:
+         import resource
+      except ImportError:
+         self._logger('WARNING: checking file descriptors limit not supported on your platform')
+         return None
       limit=None
-      try: limit=resource.getrlimit(resource.RLIMIT_NOFILE)[0] #for Linux
+      try:
+         limit=resource.getrlimit(resource.RLIMIT_NOFILE)[0] #for Linux
       except: pass
-      try: limit=resource.getrlimit(resource.RLIMIT_OFILE)[0] #for BSD
+      try:
+         limit=resource.getrlimit(resource.RLIMIT_OFILE)[0] #for BSD
       except: pass
       if limit is None:
          self._logger("Can't get File Descriptor Limit")
@@ -798,8 +811,9 @@ class flaskJSONRPCServer:
          if self._isDict(data['params']): params=data['params']
          elif self._isArray(data['params']): #convert *args to **kwargs
             for i, v in enumerate(data['params']): params[_args[i]]=v
-         if '_connection' in _args: #add connection info if needed
-            params['_connection']={
+         magicVarForDispatcher=self.settings.magicVarForDispatcher
+         if magicVarForDispatcher in _args: #add connection info if needed
+            params[magicVarForDispatcher]={
                'headers':dict([h for h in request.headers]) if not self._isDict(request.headers) else request.headers,
                'cookies':request.cookies,
                'ip':request.environ.get('HTTP_X_REAL_IP', request.remote_addr),
@@ -824,10 +838,10 @@ class flaskJSONRPCServer:
             }
             # overload _connection
             if self._isDict(overload):
-               for k, v in overload.items(): params['_connection'][k]=v
+               for k, v in overload.items(): params[magicVarForDispatcher][k]=v
             elif self._isFunction(overload):
-               params['_connection']=overload(params['_connection'])
-            params['_connection']=magicDict(params['_connection'])
+               params[magicVarForDispatcher]=overload(params[magicVarForDispatcher])
+            params[magicVarForDispatcher]=magicDict(params[magicVarForDispatcher])
          #locking
          self.wait(dispatcher=dispatcher, sleepMethod=_sleep)
          #call dispatcher
@@ -924,15 +938,18 @@ class flaskJSONRPCServer:
 
    def _requestHandler(self, path, method=None):
       if self._inChild(): self._throw('This method can be called only from <main> process')
+      self.processingRequestCount+=1
+      self._gcStats.processedRequestCount+=1
       try:
          res=self._requestProcess(path, method)
          if self.settings.controlGC: self._controlGC() # call GC manually
-         return res
       except Exception:
          s=self._getErrorInfo()
          self._logger('ERROR processing request: %s'%(s))
          if self.settings.controlGC: self._controlGC() # call GC manually
-         return Response(status=500, response=s)
+         res=Response(status=500, response=s)
+      self.processingRequestCount-=1
+      return res
 
    def _requestProcess(self, path, method):
       if self._inChild(): self._throw('This method can be called only from <main> process')
@@ -955,8 +972,6 @@ class flaskJSONRPCServer:
          self._logger('UNKNOWN_PATH:', path)
          return Response(status=404)
       # start processing request
-      self.processingRequestCount+=1
-      self._gcStats.processedRequestCount+=1
       error=[]
       out=[]
       outHeaders={}
@@ -968,7 +983,6 @@ class flaskJSONRPCServer:
       self._logger('RAW_REQUEST:', request.url, request.method, request.get_data())
       if self._isFunction(self.settings.auth):
          if self.settings.auth(self, path, self._copyRequestContext(request), method) is not True:
-            self.processingRequestCount-=1
             self._speedStatsAdd('generateResponse', self._getms()-mytime)
             self._logger('ACCESS_DENIED:', request.url, request.method, request.get_data())
             return Response(status=403)
@@ -1057,7 +1071,6 @@ class flaskJSONRPCServer:
             out.append({'jsonpCB':jsonpCB, 'data':{"error":{"code": -32601, "message": "Method not found"}}})
          elif not self.routes[path][method].allowJSONP: #fallback to JSONP denied
             self._logger('JSONP_DENIED:', path, method)
-            self.processingRequestCount-=1
             return Response(status=403)
          else: #process correct request
             params=dict([(k, v) for k, v in request.args.items()])
@@ -1101,7 +1114,6 @@ class flaskJSONRPCServer:
          except: resp.set_cookie(c.get('name', ''), c.get('value', ''), expires=c.get('expires', 2147483647))
       self._logger('GENERATE_TIME:', round(self._getms()-mytime, 1))
       self._speedStatsAdd('generateResponse', self._getms()-mytime)
-      self.processingRequestCount-=1
       if resp.status_code!=200 or len(resp.data)<self.setts.compressMinSize or not allowCompress or 'gzip' not in request.headers.get('Accept-Encoding', '').lower():
          # without compression
          return resp
@@ -1146,7 +1158,11 @@ class flaskJSONRPCServer:
          except ImportError: self._throw('gevent backend not found')
          self._logger('SERVER RUNNING AS GEVENT..')
          from gevent import monkey
-         monkey.patch_all(sys=False, os=False, thread=False, time=False, ssl=False, socket=False) #! "os" may cause some problems with multiprocessing. but better get original objects in execBackend
+         monkeyPatchSupported, _, _, _=inspect.getargspec(monkey.patch_all)
+         if 'sys' in monkeyPatchSupported:
+            monkey.patch_all(sys=False, os=False, thread=False, time=False, ssl=False, socket=False) #! "os" may cause some problems with multiprocessing. but better get original objects in execBackend
+         else: # for old version of gevent
+            monkey.patch_all(os=False, thread=False, time=False, ssl=False, socket=False, dns=False)
          self._importAll()
          from gevent.pywsgi import WSGIServer
          from gevent.pool import Pool
