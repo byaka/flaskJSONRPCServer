@@ -52,7 +52,7 @@ class flaskJSONRPCServer:
    :param bool|dict cors: Add CORS headers to output (Access-Control-Allow-*). If 'dict', can contain values for <origin> and <method>.
    :param bool gevent: Use Gevent's PyWSGI insted of Flask's Werkzeug.
    :param bool debug: Allow log messages from WSGI-backend.
-   :param bool log: Allow log messages about activity of flaskJSONRPCServer.
+   :param int|bool log: Set log-level or disable log messages about activity of flaskJSONRPCServer. If it's <int>, set log-level. 1 is error, 2 is warning, 3 is info, 4 is debug.
    :param bool fallback: Automatically accept and process JSONP requests.
    :param bool allowCompress: Allowing compression of output.
    :param list ssl: List or sequence, containing KEY and CERT. If passed, WSGI-backend will be switched to SSL protocol.
@@ -67,7 +67,7 @@ class flaskJSONRPCServer:
    :param str magicVarForDispatcher: Name for variable, that can be passed to every dispatcher and will contain many useful data and methods.
    """
 
-   def __init__(self, bindAdress, blocking=False, cors=False, gevent=False, debug=False, log=True, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=2*1024*1024, jsonBackend='simplejson', notifBackend='simple', dispatcherBackend='simple', auth=None, experimental=False, controlGC=True, magicVarForDispatcher='_connection'):
+   def __init__(self, bindAdress, blocking=False, cors=False, gevent=False, debug=False, log=3, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=2*1024*1024, jsonBackend='simplejson', notifBackend='simple', dispatcherBackend='simple', auth=None, experimental=False, controlGC=True, magicVarForDispatcher='_connection'):
       self.consoleColor=magicDict({'header':'\033[95m', 'okblue':'\033[94m', 'okgreen':'\033[92m', 'warning':'\033[93m', 'fail':'\033[91m', 'end':'\033[0m', 'bold':'\033[1m', 'underline':'\033[4m'})
       # Flask imported here for avoiding error in setup.py if Flask not installed yet
       global Flask, request, Response
@@ -130,7 +130,7 @@ class flaskJSONRPCServer:
       self.jsonBackend=json
       if self._isString(jsonBackend):
          try: self.jsonBackend=__import__(jsonBackend)
-         except: self._logger('Cant import JSON-backend "%s", used standart'%(jsonBackend))
+         except: self._logger(2, 'Cant import JSON-backend "%s", used standart'%(jsonBackend))
       elif jsonBackend: self.jsonBackend=jsonBackend
       self.execBackend={}
       # select Dispatcher-backend
@@ -272,7 +272,7 @@ class flaskJSONRPCServer:
       try:
          import resource
       except ImportError:
-         self._logger('WARNING: tweaking file descriptors limit not supported on your platform')
+         self._logger(2, 'WARNING: tweaking file descriptors limit not supported on your platform')
          return None
       if descriptors:
          try: #for Linux
@@ -299,7 +299,7 @@ class flaskJSONRPCServer:
          return c
       except Exception, e:
          self._speedStatsAdd('countFileDescriptor', self._getms()-mytime)
-         self._logger("Can't count File Descriptor for PID %s: %s"%(pid, e))
+         self._logger(2, "Can't count File Descriptor for PID %s: %s"%(pid, e))
          return None
 
    def _countMemory(self, pid=None):
@@ -321,7 +321,7 @@ class flaskJSONRPCServer:
             if key=='peak': res['peak']=int(parts[1])
             elif key=='rss': res['now']=int(parts[1])
       except Exception, e:
-         self._logger("Can't count memory for PID %s: %s"%(pid, e))
+         self._logger(2, "Can't count memory for PID %s: %s"%(pid, e))
          res=None
       finally:
          if data is not None: data.close()
@@ -338,7 +338,7 @@ class flaskJSONRPCServer:
       try:
          import resource
       except ImportError:
-         self._logger('WARNING: checking file descriptors limit not supported on your platform')
+         self._logger(1, 'ERROR: checking file descriptors limit not supported on your platform')
          return None
       limit=None
       try:
@@ -348,7 +348,7 @@ class flaskJSONRPCServer:
          limit=resource.getrlimit(resource.RLIMIT_OFILE)[0] #for BSD
       except: pass
       if limit is None:
-         self._logger("Can't get File Descriptor Limit")
+         self._logger(2, "Can't get File Descriptor Limit")
          return None
       c=self._countFileDescriptor()
       if c is None: return None
@@ -398,7 +398,7 @@ class flaskJSONRPCServer:
          c=zipfile.ZipFile(fName, method)
          try: s=c.read(method)
          except Exception, e:
-            self._logger('Error fileGet', fName, ',', method, e)
+            self._logger(1, 'Error fileGet', fName, ',', method, e)
             s=None
          try: c.close()
          except: pass
@@ -406,7 +406,7 @@ class flaskJSONRPCServer:
          try:
             with open(fName, method) as f: s=f.read()
          except Exception, e:
-            self._logger('Error fileGet', fName, ',', method, e)
+            self._logger(1, 'Error fileGet', fName, ',', method, e)
             s=None
       return s
 
@@ -465,7 +465,7 @@ class flaskJSONRPCServer:
          return s
       except Exception, e:
          self._speedStatsAdd('sha1', self._getms()-mytime)
-         self._logger('ERROR in _sha1():', e)
+         self._logger(1, 'ERROR in _sha1():', e)
          return str(random.randint(99999, 9999999))
 
    def _sha256(self, text):
@@ -485,7 +485,7 @@ class flaskJSONRPCServer:
          return s
       except Exception, e:
          self._speedStatsAdd('sha256', self._getms()-mytime)
-         self._logger('ERROR in _sha256():', e)
+         self._logger(1, 'ERROR in _sha256():', e)
          return str(random.randint(99999, 9999999))
 
    def _randomEx(self, mult=262144, vals=None, pref='', suf='', soLong=3, cbSoLong=lambda s: s*2):
@@ -508,7 +508,7 @@ class flaskJSONRPCServer:
          s=pref+str(int(random.random()*mult))+suf
          if self._getms(False)-mytime>soLong: #защита от бесконечного цикла
             mytime=self._getms(False)
-            self._logger('randomEx: generating value so long!')
+            self._logger(2, 'randomEx: generating value so long!')
             if self._isFunction(cbSoLong):
                mult=cbSoLong(mult, vals, pref, suf)
                if mult is None: return None
@@ -591,7 +591,7 @@ class flaskJSONRPCServer:
          m=inspect.getmodule(stk[0])
          break
       if m is None:
-         return self._logger("Cant find parent's module")
+         return self._logger(1, "Cant find parent's module")
       self._parentModule=m
 
    def _importGlobalsFromParent(self, scope=None, typeOf=None):
@@ -754,7 +754,7 @@ class flaskJSONRPCServer:
          return True, tArr2
       except Exception, e:
          self._speedStatsAdd('parseRequest', self._getms()-mytime)
-         self._logger('Error parseRequest', e)
+         self._logger(1, 'Error parseRequest', e)
          return False, e
 
    def _prepResponse(self, data, isError=False):
@@ -832,11 +832,19 @@ class flaskJSONRPCServer:
          res.update(r)
       return res
 
-   def _logger(self, *args):
+   def _logger(self, level, *args):
       """
       This method is wrapper for logger.
+
+      :param int level: Info-level of message. 0 is critical (and visible always), 1 is error, 2 is warning, 3 is info, 4 is debug. If is not number, it passed as first part of message.
       """
-      if not self.setts.log: return
+      if level is not 0: # critical msg
+         if not self.setts.log: return
+         if not self._isNum(level): # fallback
+            args=list(args)
+            args.insert(level, 0)
+         elif self.setts.log is True: pass
+         elif level>self.setts.log: return
       for i in xrange(len(args)):
          s=args[i]
          try: sys.stdout.write(s)
@@ -971,8 +979,8 @@ class flaskJSONRPCServer:
          msg='ERROR on <server>._reload(): %s'%e
          if safely:
             self.routes=oldRoutes
-            self._logger(msg)
-            self._logger('Server is reloaded in safe-mode, so all dispatchers was restored. But if you overloaded some globals in callback, they can not be restored!')
+            self._logger(1, msg)
+            self._logger(3, 'Server is reloaded in safe-mode, so all dispatchers was restored. But if you overloaded some globals in callback, they can not be restored!')
          else: self._throw(msg)
       # start execBackends
       self._startExecBackends()
@@ -1154,7 +1162,7 @@ class flaskJSONRPCServer:
       """
       if gc.isenabled() and self.settings.controlGC:
          gc.disable()
-         self._logger('GC disabled by manual control')
+         self._logger(3, 'GC disabled by manual control')
          self._gcStats.lastTime=self._getms(False)
          self._gcStats.processedRequestCount=0
          self._gcStats.processedDispatcherCount=0
@@ -1172,7 +1180,7 @@ class flaskJSONRPCServer:
       s=gc.collect()
       m2=self._countMemory()
       print 'Collected %s, memore freed %smb, used %smb, peak %smb'%(s, round((m1.now-m2.now)/1024.0, 1), round(m2.now/1024.0, 1), round(m2.peak/1024.0, 1))
-      self._logger('GC executed manually: collected %s objects, memore freed %smb, used %smb, peak %smb'%(s, round((m1.now-m2.now)/1024.0, 1), round(m2.now/1024.0, 1), round(m2.peak/1024.0, 1)))
+      self._logger(3, 'GC executed manually: collected %s objects, memore freed %smb, used %smb, peak %smb'%(s, round((m1.now-m2.now)/1024.0, 1), round(m2.now/1024.0, 1), round(m2.peak/1024.0, 1)))
       self._speedStatsAdd('controlGC', self._getms()-mytime)
       self._gcStats.lastTime=self._getms(False)
       self._gcStats.processedRequestCount=0
@@ -1276,7 +1284,7 @@ class flaskJSONRPCServer:
          if self.settings.controlGC: self._controlGC() # call GC manually
       except Exception:
          s=self._getErrorInfo()
-         self._logger('ERROR processing request: %s'%(s))
+         self._logger(1, 'ERROR processing request: %s'%(s))
          if self.settings.controlGC: self._controlGC() # call GC manually
          res=Response(status=500, response=s)
       self.processingRequestCount-=1
@@ -1307,7 +1315,7 @@ class flaskJSONRPCServer:
       self.connPerMinute.count+=1
       path=self._formatPath(path)
       if path not in self.routes:
-         self._logger('UNKNOWN_PATH:', path)
+         self._logger(2, 'UNKNOWN_PATH:', path)
          return Response(status=404)
       # start processing request
       error=[]
@@ -1318,11 +1326,11 @@ class flaskJSONRPCServer:
       mytime=self._getms()
       allowCompress=self.setts.allowCompress
       mimeType=self._calcMimeType(request)
-      self._logger('RAW_REQUEST:', request.url, request.method, request.get_data())
+      self._logger(4, 'RAW_REQUEST:', request.url, request.method, request.get_data())
       if self._isFunction(self.settings.auth):
          if self.settings.auth(self, path, self._copyRequestContext(request), method) is not True:
             self._speedStatsAdd('generateResponse', self._getms()-mytime)
-            self._logger('ACCESS_DENIED:', request.url, request.method, request.get_data())
+            self._logger(2, 'ACCESS_DENIED:', request.url, request.method, request.get_data())
             return Response(status=403)
       # CORS
       if self.setts.CORS:
@@ -1334,10 +1342,10 @@ class flaskJSONRPCServer:
             outHeaders['Access-Control-Allow-Origin']='*'
       # Look at request's type
       if request.method=='OPTIONS':
-         self._logger('REQUEST_TYPE == OPTIONS')
+         self._logger(4, 'REQUEST_TYPE == OPTIONS')
       elif request.method=='POST': #JSONRPC
          data=request.get_data()
-         self._logger('REQUEST:', data)
+         self._logger(4, 'REQUEST:', data)
          status, dataInList=self._parseRequest(data)
          if not status: #error of parsing
             error={"code": -32700, "message": "Parse error"}
@@ -1365,7 +1373,7 @@ class flaskJSONRPCServer:
                      if hasattr(execBackend, 'add'):
                         # copy request's context
                         status, m=execBackend.add(uniqueId, path, dataIn, self._copyRequestContext(request))
-                        if not status: self._logger('Error in notifBackend.add(): %s'%m)
+                        if not status: self._logger(1, 'Error in notifBackend.add(): %s'%m)
                      else:
                         status, params, result=self._callDispatcher(uniqueId, path, dataIn, request)
                   else: #simple request
@@ -1388,8 +1396,8 @@ class flaskJSONRPCServer:
                      else:
                         error.append({"code": 500, "message": result, "id":dataIn['id']})
          # prepare output for response
-         self._logger('ERRORS:', error)
-         self._logger('OUT:', out)
+         self._logger(4, 'ERRORS:', error)
+         self._logger(4, 'OUT:', out)
          if self._isDict(error): #error of parsing
             dataOut=self._prepResponse(error, isError=True)
          elif len(error) and len(dataInList)>1: #error for batch request
@@ -1402,13 +1410,13 @@ class flaskJSONRPCServer:
             dataOut=self._prepResponse(out[0], isError=False)
          dataOut=self._serializeJSON(dataOut)
       elif request.method=='GET': #JSONP fallback
-         self._logger('REQUEST:', method, request.args)
+         self._logger(4, 'REQUEST:', method, request.args)
          jsonpCB=request.args.get('jsonp', False)
          jsonpCB='%s(%%s);'%(jsonpCB) if jsonpCB else '%s;'
          if not method or method not in self.routes[path]: #call of uncknown method
             out.append({'jsonpCB':jsonpCB, 'data':{"error":{"code": -32601, "message": "Method not found"}}})
          elif not self.routes[path][method].allowJSONP: #fallback to JSONP denied
-            self._logger('JSONP_DENIED:', path, method)
+            self._logger(2, 'JSONP_DENIED:', path, method)
             return Response(status=403)
          else: #process correct request
             params=dict([(k, v) for k, v in request.args.items()])
@@ -1439,18 +1447,18 @@ class flaskJSONRPCServer:
             else:
                out.append({'jsonpCB':jsonpCB, 'data':result})
          # prepare output for response
-         self._logger('ERRORS:', error)
-         self._logger('OUT:', out)
+         self._logger(4, 'ERRORS:', error)
+         self._logger(4, 'OUT:', out)
          if len(out): #response for simple request
             dataOut=self._serializeJSON(out[0]['data'])
             dataOut=out[0]['jsonpCB']%(dataOut)
-      self._logger('RESPONSE:', dataOut)
+      self._logger(4, 'RESPONSE:', dataOut)
       resp=Response(response=dataOut, status=200, mimetype=mimeType)
       for hk, hv in outHeaders.items(): resp.headers[hk]=hv
       for c in outCookies:
          try: resp.set_cookie(c.get('name', ''), c.get('value', ''), expires=c.get('expires', 2147483647), domain=c.get('domain', '*'))
          except: resp.set_cookie(c.get('name', ''), c.get('value', ''), expires=c.get('expires', 2147483647))
-      self._logger('GENERATE_TIME:', round(self._getms()-mytime, 1))
+      self._logger(4, 'GENERATE_TIME:', round(self._getms()-mytime, 1))
       self._speedStatsAdd('generateResponse', self._getms()-mytime)
       if resp.status_code!=200 or len(resp.data)<self.setts.compressMinSize or not allowCompress or 'gzip' not in request.headers.get('Accept-Encoding', '').lower():
          # without compression
@@ -1459,7 +1467,7 @@ class flaskJSONRPCServer:
       mytime=self._getms()
       try: resp=self._compressResponse(resp)
       except Exception, e: print e
-      self._logger('COMPRESSION TIME:', round(self._getms()-mytime, 1))
+      self._logger(4, 'COMPRESSION TIME:', round(self._getms()-mytime, 1))
       return resp
 
    def serveForever(self, restartOn=False, sleep=10):
@@ -1521,11 +1529,11 @@ class flaskJSONRPCServer:
       self._startExecBackends()
       # reset flask routing (it useful when somebody change self.flaskApp)
       self._registerServerUrl(dict([[s, self._requestHandler] for s in self.pathsDef]))
-      if self.settings.allowCompress: self._logger('WARNING: included compression is slow')
+      if self.settings.allowCompress: self._logger(2, 'WARNING: included compression is slow')
       if self.setts.gevent:
          try: import gevent
          except ImportError: self._throw('gevent backend not found')
-         self._logger('SERVER RUNNING AS GEVENT..')
+         self._logger(3, 'SERVER RUNNING AS GEVENT..')
          from gevent import monkey
          monkeyPatchSupported, _, _, _=inspect.getargspec(monkey.patch_all)
          if 'sys' in monkeyPatchSupported:
@@ -1550,13 +1558,13 @@ class flaskJSONRPCServer:
             self._server=WSGIServer(bindAdress, self.getWSGI(), log=('default' if self.setts.debug else False), spawn=self._serverPool, keyfile=self.setts.ssl[0], certfile=self.setts.ssl[1], ssl_version=ssl.PROTOCOL_TLSv1_2) #ssl.PROTOCOL_SSLv23
          else:
             self._server=WSGIServer(bindAdress, self.getWSGI(), log=('default' if self.setts.debug else False), spawn=self._serverPool)
-         if self.setts.blocking: self._logger('WARNING: blocking mode not implemented for gevent')
+         if self.setts.blocking: self._logger(2, 'WARNING: blocking mode not implemented for gevent')
          if joinLoop: self._server.serve_forever()
          else: self._server.start()
       else:
          if self.setts.socket:
             self._throw('Serving on *unix-domain-socket not supported without gevent')
-         self._logger('SERVER RUNNING..')
+         self._logger(4, 'SERVER RUNNING..')
          if not self.setts.debug:
             import logging
             log=logging.getLogger('werkzeug')
@@ -1616,7 +1624,7 @@ class flaskJSONRPCServer:
       if processingDispatcherCountMax is not False:
          while self.processingDispatcherCount>processingDispatcherCountMax:
             if timeout and self._getms()-mytime>=timeout*1000:
-               self._logger('Warning: So long wait for completing dispatchers(%s)'%(self.processingDispatcherCount))
+               self._logger(2, 'Warning: So long wait for completing dispatchers(%s)'%(self.processingDispatcherCount))
                break
             self._sleep(self.setts.sleepTime_checkProcessingCount)
 
@@ -1649,7 +1657,7 @@ class flaskJSONRPCServer:
          if r:
             self._deepUnlock()
             self._throw(r)
-      self._logger('SERVER STOPPED')
+      self._logger(3, 'SERVER STOPPED')
       self.processingRequestCount=0
       self._deepUnlock()
 
