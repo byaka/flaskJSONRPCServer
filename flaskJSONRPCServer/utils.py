@@ -28,6 +28,7 @@ class magicDict(dict):
    def __getattr__(self, attr):
       if attr[:2]=='__': raise AttributeError #for support PICKLE protocol and correct _isFunction() check
       return self.get(attr, None)
+
    # __getattr__=dict.__getitem__
    __setattr__=dict.__setitem__
    __delattr__=dict.__delitem__

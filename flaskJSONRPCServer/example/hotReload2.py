@@ -32,14 +32,14 @@ def testForReload2(_connection=None):
 # dispatcher for reloading, call him
 def reloadApi(globally=False, _connection=None):
    # callback for overloading globals
-   def overloadAdditional(_, module, dispatcher):
+   def callbackForManualOverload(server, module, dispatcher):
       if not globally: return
       # overload globals also
       for k in dir(module):
          globals()[k]=getattr(module, k)
    # what we want to reload
    data=[
-      {'dispatcher':'testForReload1', 'scriptPath':_connection.server._getScriptPath(True), 'isInstance':False,'overload':[{}, overloadAdditional], 'path':'/api'}
+      {'dispatcher':'testForReload1', 'scriptPath':_connection.server._getScriptPath(True), 'isInstance':False,'overload':[{}, callbackForManualOverload], 'path':'/api'}
    ]
    # <clearOld>   if True, all existing dispatchers will be removed
    # <timeout>    is how long (in seconds) we wait for compliting all existing requests

@@ -12,12 +12,14 @@ asyncJSON:
 uJSON
    Extremely fast JSON-backend.
 """
+
 if __name__=='__main__':
    import sys, os
    sys.path.append(os.path.dirname(os.path.realpath(sys.argv[0]))+'/..')
    from utils import magicDict
 else:
-   from flaskJSONRPCServer.utils import magicDict
+   # from flaskJSONRPCServer.utils import magicDict
+   from ..__init__ import magicDict
 
 import sys, string, time, re, codecs
 from collections import deque

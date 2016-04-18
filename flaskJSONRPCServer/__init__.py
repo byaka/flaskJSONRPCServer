@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+
 __ver_major__ = 0
 __ver_minor__ = 5
 __ver_patch__ = 2
@@ -35,26 +36,35 @@ Response=None
 
 from utils import UnixHTTPConnection, magicDict, virtVar
 
+import execBackend as execBackendCollection
+
 try:
    import experimental as experimentalPack
    experimentalPack.initGlobal(globals())
-except ImportError, e: print 'EXPERIMENTAL not loaded:', e
+except ImportError, e: print 'EXPERIMENTAL package not loaded:', e
 
 class flaskJSONRPCServer:
    """
-      :param list ipAndPort: List or sequence, containing IP and PORT.
-      :param bool blocking: Disable unblocking backend (also known as one-threaded).
-      :param bool|dict cors: Add CORS headers to output (Access-Control-Allow-*). If dict, can contain values for <origin> and <method>.
-      :param bool gevent: Use Gevent as a backend instead of Werkzeug.
-      :param bool debug: Allow log messages from backend.
-      :param bool log: Allow log messages about activity of flaskJSONRPCServer.
-      :param bool fallback: Automatically accept and process JSONP requests.
-      :param bool allowCompress: Allowing compression of output.
-      :param list ssl: List or sequence, containing KEY and CERT.
-      :param list(int,int) tweakDescriptors: List containing SOFT and HARD limits for descriptors.
-      :param int compressMinSize: Max length of output in bytes that was not compressed.
-      :param str|obj jsonBackend: Select JSON-backend for json.loads() and json.dumps(). If this parameter 'str' type, it will be imported.  If this parameter 'obj' type, it must contain methods loads() and dumps().
-      :param str|dict|func notifBackend: Select Notif-backend for processing notify-requests. Lib include blocking backend ('simple') and non-blocking backend ('threadPool'). ThreadPool backend automatically switching to coroutines if gevent used. If this parameter 'dict' type, it must contain 'add' key as function. This function be called on notify-request. Optionally it can contain 'init' key as function and be called when server starting. If this parameter 'func' type, it will used like 'add'.
+   Main class of server.
+
+   :param list ipAndPort: List or sequence, containing IP and PORT.
+   :param bool blocking: Disable async mode and switch server to blocking mode(also known as one-threaded).
+   :param bool|dict cors: Add CORS headers to output (Access-Control-Allow-*). If 'dict', can contain values for <origin> and <method>.
+   :param bool gevent: Use Gevent's PyWSGI insted of Flask's Werkzeug.
+   :param bool debug: Allow log messages from WSGI-backend.
+   :param bool log: Allow log messages about activity of flaskJSONRPCServer.
+   :param bool fallback: Automatically accept and process JSONP requests.
+   :param bool allowCompress: Allowing compression of output.
+   :param list ssl: List or sequence, containing KEY and CERT. If passed, WSGI-backend will be switched to SSL protocol.
+   :param list(int,int) tweakDescriptors: List containing new soft and hard limits of file-descriptors for current process.
+   :param int compressMinSize: Max length of output in bytes that was not compressed.
+   :param str|obj jsonBackend: Select JSON-backend for json.loads() and json.dumps(). If this parameter 'str' type, module with passed name will be imported.  If this parameter 'obj' type, it must contain methods loads() and dumps().
+   :param str|dict|func notifBackend: Select default dispatcher-exec-backend for processing notify-requests. Lib include some prepared backends. Variable <execBackendCollection.execBackendMap> contained all of them. If this parameter 'dict' type, it must contain 'add' key as function, that will be called on every notify-request and recive all data about request. Optionally it can contain 'start' and 'stop' keys as functions (it will be called when server starting or stopping) and '_id' key, containing unique identificator. If this parameter 'func' type, it will used like 'add'.
+   :param str|dict|func dispatcherBackend: Select default dispatcher-exec-backend for processing regular requests. Lib include some prepared backends. Variable <execBackendCollection.execBackendMap> contained all of them. If this parameter 'dict' type, it must contain 'add' key as function, that will be called on every notify-request and recive all data about request. Also it must contain 'check' function, that will be called for waiting result of processed requests. Optionally it can contain 'start' and 'stop' keys as functions (it will be called when server starting or stopping) and '_id' key, containing unique identificator. If this parameter 'func' type, it will used like 'add'.
+   :param func auth: This function will be called on every request to server 9before processing it) and must return status as 'bool' type.
+   :param bool experimental: If 'True', server will be patched with 'experimental' package.
+   :param bool controlGC: If 'True', server will control GarbageCollector and manually call 'gc.collect()' (by default every 60 minutes or 300k requests or 50k dispatcher's calls).
+   :param str magicVarForDispatcher: Name for variable, that can be passed to every dispatcher and will contain many useful data and methods.
    """
 
    def __init__(self, bindAdress, blocking=False, cors=False, gevent=False, debug=False, log=True, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=2*1024*1024, jsonBackend='simplejson', notifBackend='simple', dispatcherBackend='simple', auth=None, experimental=False, controlGC=True, magicVarForDispatcher='_connection'):
@@ -142,13 +152,20 @@ class flaskJSONRPCServer:
       if self.settings.controlGC: self._controlGC()
 
    def _registerExecBackend(self, execBackend, notif):
+      """
+      This merhod register new execute backend in server, backend will be start when <server>.start() called.
+
+      :param str|obj execBackend: registered backend name or obj.
+      :param bool notif: flag indicating is this backend a notification backend.
+      :return: unique identification.
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       # check if execBackend._id passed. If true, not needed to initialize it
       if execBackend in self.execBackend: return execBackend
       # get _id of backend and prepare
       _id=None
-      if execBackend in execBackendMap: #backend with non-blocking executing
-         execBackend=execBackendMap[execBackend](notif)
+      if execBackend in execBackendCollection.execBackendMap: #backend with non-blocking executing
+         execBackend=execBackendCollection.execBackendMap[execBackend](notif)
          _id=getattr(execBackend, '_id', None)
       elif execBackend=='simple': #backend with blocking executing (like standart requests)
          _id='simple'
@@ -165,11 +182,22 @@ class flaskJSONRPCServer:
          self.execBackend[_id]=execBackend
       return _id
 
-   def _getServerUrl(self):
+   def _getServerUrl(self, *args):
+      """
+      This method return server's urls.
+
+      :return list:  ['/static/<path:filename>', '/<path>/<method>/', '/<path>/<method>', '/<path>/', '/<path>'].
+      """
       res=[str(s) for s in self.flaskApp.url_map.iter_rules()]
       return res
 
    def _registerServerUrl(self, urlMap, methods=None):
+      """
+      This method register new url on server for specific http-methods.
+
+      :param dict urlMap: Map of urls and functions(handlers).
+      :return:
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       if methods is None: methods=['GET', 'OPTIONS', 'POST']
       urlNow=self._getServerUrl()
@@ -178,8 +206,10 @@ class flaskJSONRPCServer:
          self.flaskApp.add_url_rule(rule=s, view_func=h, methods=methods, strict_slashes=False)
 
    def _import(self, modules, scope=None, forceDelete=True):
-      """ replace existed imported module and monke_putch if needed """
-      #! maybe it can be usefull gevent.socket.__implements__
+      """
+      This methodReplace existed imported module and monke_putch if needed.
+      """
+      #! maybe it can be useful gevent.socket.__implements__
       #! Add checking with "monkey.is_module_patched()"
       for k, v in modules.items(): #delete existed
          if k in globals(): del globals()[k]
@@ -198,6 +228,13 @@ class flaskJSONRPCServer:
       return scope
 
    def _importThreading(self, scope=None, forceDelete=True):
+      """
+      This method import (or patch) module <threading>(and time.sleep) to scope.
+
+      :param dict scope:
+      :param bool forceDelete: if True really delete existed modul before importing.
+      :return: scope
+      """
       modules={
          'threading':None,
          'thread':['patch_thread', {'threading':True}], #'_threading_local':True, 'Event':False', logging':True, 'existing_locks':True
@@ -206,6 +243,13 @@ class flaskJSONRPCServer:
       return self._import(modules, scope=scope, forceDelete=forceDelete)
 
    def _importSocket(self, scope=None, forceDelete=True):
+      """
+      This method import (or patch) module <socket> to scope.
+
+      :param dict scope:
+      :param bool forceDelete: if True really delete existed modul before importing.
+      :return: scope
+      """
       modules={
          'socket':['patch_socket', {'dns':True, 'aggressive':True}],
          'ssl':'patch_ssl'
@@ -213,11 +257,18 @@ class flaskJSONRPCServer:
       return self._import(modules, scope=scope, forceDelete=forceDelete)
 
    def _importAll(self, scope=None, forceDelete=True):
+      """
+      This method call _importThreading() and _importSocket().
+      """
       self._importThreading(scope=scope, forceDelete=forceDelete)
       self._importSocket(scope=scope, forceDelete=forceDelete)
 
    def _tweakLimit(self, descriptors=(65536, 65536)):
-      """ Tweak ulimit for more file descriptors """
+      """
+      This method change file descriptor's limit of current process.
+
+      :param  list(int, int) descriptors: New soft and hard limit.
+      """
       try:
          import resource
       except ImportError:
@@ -234,7 +285,12 @@ class flaskJSONRPCServer:
          except: pass
 
    def _countFileDescriptor(self, pid=None):
-      """Count used file descriptors by process"""
+      """
+      This method return number of used file descriptors by process.
+
+      :param int|str pid: Process ID if None then pid is ID of current proccess.
+      :return int:
+      """
       mytime=self._getms()
       pid=os.getpid() if pid is None else pid
       try:
@@ -247,7 +303,12 @@ class flaskJSONRPCServer:
          return None
 
    def _countMemory(self, pid=None):
-      """Count used memory by process in kilobytes"""
+      """
+      This method return used memory by process in kilobytes.
+
+      :param int pid: Process ID if None then pid is ID of current proccess.
+      :return dict:  {'peak': 'max used memory', 'now': 'current used memory'}
+      """
       mytime=self._getms()
       pid=os.getpid() if pid is None else pid
       data=None
@@ -268,6 +329,12 @@ class flaskJSONRPCServer:
       return res
 
    def _checkFileDescriptor(self, multiply=1.0):
+      """
+      This method check if used file descriptors near limit.
+
+      :param float multiply: Multiply factor.
+      :return bool:
+      """
       try:
          import resource
       except ImportError:
@@ -288,9 +355,20 @@ class flaskJSONRPCServer:
       return (c*multiply>=limit)
 
    def _inChild(self):
+      """
+      This methotd  retur True if used in  Child proccess or return False if used in Parent.
+
+      :return bool:
+      """
       return self._pid!=os.getpid()
 
    def _getms(self, inMS=True):
+      """
+      This method return curent(unix timestamp) time in millisecond or second.
+
+      :param bool inMS: If True in millisecond, else in seconds.
+      :retrun int:
+      """
       if inMS: return time.time()*1000.0
       else: return int(time.time())
 
@@ -307,7 +385,13 @@ class flaskJSONRPCServer:
    def _isNum(self, var): return isinstance(var, (int, float, long, complex, decimal.Decimal))
 
    def _fileGet(self, fName, method='r'):
-      """ Get content from file,using $method and if file is ZIP, read file $method in this archive """
+      """
+      This method open file and read content in mode <method>, if file is archive then open it and find file with name <method>.
+
+      :param str fName: Path to file.
+      :param str method: Read-mode or file name.
+      :return str:
+      """
       fName=fName.encode('cp1251')
       if not os.path.isfile(fName): return None
       if zipfile.is_zipfile(fName):
@@ -327,11 +411,31 @@ class flaskJSONRPCServer:
       return s
 
    def _fileWrite(self, fName, text, mode='w'):
+      """
+      This method write content to file with specific mode.
+      If mode is 'a' method append data to the end of file.
+
+      :param str text:
+      :param str fName: Path to file.
+      :param str mode: Write-mode.
+      :return str:
+      """
       if not self._isString(text): text=repr(text)
       with open(fName, mode) as f: f.write(text)
 
    def _strGet(self, text, pref='', suf='', index=0, default=None):
-      """ Return pattern by format pref+pattenr+suf """
+      """
+      This method find prefix, then find suffix and return data between them.
+      If prefix is empty, prefix is beginnig of input data.
+      If suffix is empty, suffix is ending of input data.
+
+      :param str text: Input data.
+      :param str pref: Prefix.
+      :param str suf: Suffix.
+      :param int index: Position for finding.
+      :param any default: Return this if nothing finded.
+      :return str:
+      """
       if(text==''): return ''
       text1=text.lower()
       pref=pref.lower()
@@ -345,7 +449,13 @@ class flaskJSONRPCServer:
       return text[i1+len(pref):i2]
 
    def _sha1(self, text):
-      #wrapper for sha1
+      """
+      This method generate hash with sha1.
+      Length of symbols = 40.
+
+      :param str text:
+      :return str:
+      """
       mytime=self._getms()
       try:
          try: c=hashlib.sha1(text)
@@ -359,7 +469,13 @@ class flaskJSONRPCServer:
          return str(random.randint(99999, 9999999))
 
    def _sha256(self, text):
-      #wrapper for sha256
+      """
+      This method generate hash with sha1.
+      Length of symbols = 64.
+
+      :param str text:
+      :return str:
+      """
       mytime=self._getms()
       try:
          try: c=hashlib.sha256(text)
@@ -373,6 +489,18 @@ class flaskJSONRPCServer:
          return str(random.randint(99999, 9999999))
 
    def _randomEx(self, mult=262144, vals=None, pref='', suf='', soLong=3, cbSoLong=lambda s: s*2):
+      """
+      This method generate random value from 0 to <mult> and add prefix and suffix.
+      Also has protection against the repeating values and against recurrence (long generation).
+
+      :param int mult:
+      :param list vals: Blacklist of generated data.
+      :param str pref: Prefix.
+      :param str suf: Suffix.
+      :param int soLong: Max time in seconds for generating.
+      :param func cbSoLong: This function will called if generating so long. It can return new <mult>. If return None, generating will be aborted.
+      :return str: None if some problems or aborted.
+      """
       if vals is None: vals=[]
       s=pref+str(int(random.random()*mult))+suf
       mytime=self._getms(False)
@@ -388,9 +516,20 @@ class flaskJSONRPCServer:
       return s
 
    def _throw(self, data):
+      """
+      This method throw exception of class <ValueError:data>.
+
+      :param str data: Info about error.
+      """
       raise ValueError(data)
 
    def _sleep(self, s, forceNative=False):
+      """
+      This method is wrapper above time.sleep() or gevent.sleep(). Method swithing automatically, if <forceNative> is False. If it's True, always use time.sleep().
+
+      :param int s: Delay in milliseconds.
+      :param bool forceNative:
+      """
       if self.settings.gevent and not forceNative:
          import gevent
          _sleep=gevent.sleep
@@ -404,13 +543,25 @@ class flaskJSONRPCServer:
             _sleep=time.sleep
       _sleep(s)
 
-   def _getScriptPath(self, full=False):
+   def _getScriptPath(self, full=False, real=True):
+      """
+      This method receives a way to a script. If <full> is False return only path, else return path and file name.
+
+      :param bool full:
+      :retunr str:
+      """
       if full:
-         return os.path.realpath(sys.argv[0])
+         return os.path.realpath(sys.argv[0]) if real else sys.argv[0]
       else:
-         return os.path.dirname(os.path.realpath(sys.argv[0]))
+         return os.path.dirname(os.path.realpath(sys.argv[0]) if real else sys.argv[0])
 
    def _getScriptName(self, withExt=False):
+      """
+      This method return name of current script. If <withExt> is True return name with extention.
+
+      :param bool withExt:
+      :return str:
+      """
       if withExt: return os.path.basename(sys.argv[0])
       else: return os.path.splitext(os.path.basename(sys.argv[0]))[0]
 
@@ -429,8 +580,11 @@ class flaskJSONRPCServer:
       return t
 
    def _findParentModule(self):
+      """
+      This method find parent module and pass him to attr <_parentModule> of server.
+      """
       m=None
-      mainPath=sys.argv[0]
+      mainPath=self._getScriptPath(True, False)
       for stk in reversed(inspect.stack()):
          # find frame of parent by module's path
          if mainPath!=stk[1]: continue
@@ -466,6 +620,12 @@ class flaskJSONRPCServer:
          self._throw("Cant import parent's globals: %s"%e)
 
    def _speedStatsAdd(self, name, val):
+      """
+      This methos write stats about passed <name>.
+
+      :param str name:
+      :param float val: time in milliseconds, that will be writed to stats.
+      """
       if self._inChild():
          self._throw('This method can be called only from <main> process')
       names=name if self._isArray(name) else [name]
@@ -483,12 +643,15 @@ class flaskJSONRPCServer:
             self.speedStats[name]=[self.speedStatsMax[name]]
 
    def registerInstance(self, dispatcher, path='', fallback=None, dispatcherBackend=None, notifBackend=None):
-      """Create dispatcher for methods of given class's instance.
-
-      *If methods has attribute _alias(List or String), it used as aliases of name.*
+      """
+      This method Create dispatcher for methods of given class's instance.
+      If methods has attribute _alias(List or String), it used as aliases of name.
 
       :param instance dispatcher: Class's instance.
       :param str path: Optional string that contain path-prefix.
+      :param bool|string fallback: Switch JSONP-mode fot this dispatchers.
+      :param str|obj dispatcherBackend: Set specific backend for this dispatchers.
+      :param str|obj notifBackend: Set specific backend for this dispatchers.
       """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       if not self._isInstance(dispatcher): self._throw('Bad dispatcher type: %s'%type(dispatcher))
@@ -514,12 +677,16 @@ class flaskJSONRPCServer:
                      self.routes[path][alias]=magicDict({'allowJSONP':fallback, 'link':link, 'dispatcherBackendId':dBckId, 'notifBackendId':nBckId})
 
    def registerFunction(self, dispatcher, path='', fallback=None, name=None, dispatcherBackend=None, notifBackend=None):
-      """Create dispatcher for given function.
+      """
+      This method reate dispatcher for given function.
+      If methods has attribute _alias(List or String), it used as aliases of name.
 
-      *If methods has attribute _alias(List or String), it used as aliases of name.*
-
-      :param func dispatcher: Link to function.
+      :param instance dispatcher: Class's instance.
       :param str path: Optional string that contain path-prefix.
+      :param bool|string fallback: Switch JSONP-mode fot this dispatcher.
+      :param str name: Alternative name for this dispatcher.
+      :param str|obj dispatcherBackend: Set specific backend for this dispatcher.
+      :param str|obj notifBackend: Set specific backend for this dispatchers.
       """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       if not self._isFunction(dispatcher): self._throw('Bad dispatcher type: %s'%type(dispatcher))
@@ -546,18 +713,36 @@ class flaskJSONRPCServer:
                self.routes[path][alias]=magicDict({'allowJSONP':fallback, 'link':dispatcher, 'dispatcherBackendId':dBckId, 'notifBackendId':nBckId})
 
    def _formatPath(self, path=''):
+      """
+      This method format path and add trailing slash.
+
+      :params str path:
+      :return str:
+      """
       path=path or '/'
       path=path if path.startswith('/') else '/'+path
       path=path if path.endswith('/') else path+'/'
       return path
 
    def _parseJSON(self, data):
+      """
+      This method parse JSON-data to native object.
+
+      :param str data:
+      :return native:
+      """
       mytime=self._getms()
       s=self.jsonBackend.loads(data)
       self._speedStatsAdd('parseJSON', self._getms()-mytime)
       return s
 
    def _parseRequest(self, data):
+      """
+      This method parse reguest's data and validate.
+
+      :param str data:
+      :return set(bool, list): First argument is validation status.
+      """
       try:
          mytime=self._getms()
          tArr1=self._parseJSON(data)
@@ -573,6 +758,13 @@ class flaskJSONRPCServer:
          return False, e
 
    def _prepResponse(self, data, isError=False):
+      """
+      This method prepare data for responce.
+
+      :param dict data:
+      :param bool isError: Switch response's format.
+      :return dict:
+      """
       id=data.get('id', None)
       if 'id' in data: del data['id']
       if isError:
@@ -582,11 +774,20 @@ class flaskJSONRPCServer:
       return s
 
    def _fixJSON(self, o):
+      """
+      This method can be called by JSON-backend and process special types.
+      """
       if isinstance(o, decimal.Decimal): return str(o) #fix Decimal conversion
       elif isinstance(o, (datetime.datetime, datetime.date, datetime.time)): return o.isoformat() #fix DateTime conversion
       # elif self._isNum(o) and o>2**31: return str(o) #? fix LONG
 
    def _serializeJSON(self, data):
+      """
+      This method convert native python object to JSON.
+
+      :param native data:
+      :return str:
+      """
       def _fixJSON(o):
          if self._isFunction(self.fixJSON): return self.fixJSON(o)
       mytime=self._getms()
@@ -595,6 +796,11 @@ class flaskJSONRPCServer:
       return s
 
    def _getErrorInfo(self):
+      """
+      This method return info about last exception.
+
+      :return str:
+      """
       tArr=inspect.trace()[-1]
       fileName=tArr[1]
       lineNo=tArr[2]
@@ -604,6 +810,12 @@ class flaskJSONRPCServer:
       return s
 
    def stats(self, inMS=False):
+      """
+      This method return statistics of server.
+
+      :param bool inMS: If True, all speed-stats will be in milliseconds, else in seconds.
+      :return dict: Collected perfomance stats
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       res={'connPerSec_now':round(self.connPerMinute.count/60.0, 2), 'connPerSec_old':round(self.connPerMinute.oldCount/60.0, 2), 'connPerSec_max':round(self.connPerMinute.maxCount/60.0, 2), 'speedStats':{}, 'processingRequestCount':self.processingRequestCount, 'processingDispatcherCount':self.processingDispatcherCount}
       #calculate speed stats
@@ -621,6 +833,9 @@ class flaskJSONRPCServer:
       return res
 
    def _logger(self, *args):
+      """
+      This method is wrapper for logger.
+      """
       if not self.setts.log: return
       for i in xrange(len(args)):
          s=args[i]
@@ -638,6 +853,11 @@ class flaskJSONRPCServer:
       except Exception, e: sys.stdout.write('<UNPRINTABLE DATA> %s'%e)
 
    def lock(self, dispatcher=None):
+      """
+      This method locking server or specific dispatcher.
+
+      :param func dispatcher:
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       if dispatcher is None: self.locked=True #global lock
       else: #local lock
@@ -646,6 +866,13 @@ class flaskJSONRPCServer:
             else: dispatcher.__locked=True
 
    def unlock(self, dispatcher=None, exclusive=False):
+      """
+      This method unlocking server or specific dispatcher.
+      If all server locked, you can unlock specific dispatcher by pass <exclusive> to True.
+
+      :param func dispatcher:
+      :param bool exclusive:
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       #exclusive=True unlock dispatcher also if global lock=True
       if dispatcher is None: self.locked=False #global lock
@@ -655,6 +882,15 @@ class flaskJSONRPCServer:
             else: dispatcher.__locked=False if exclusive else None
 
    def wait(self, dispatcher=None, sleepMethod=None, returnStatus=False):
+      """
+      This method wait while server or specific dispatcher locked.
+      If <returnStatus> is True, method only return locking status.
+      If <returnStatus> is False, method cyclically call <sleepMethod> until server or dispatcher locked.
+
+      :param func dispatcher:
+      :param func sleepMethod:
+      :param bool returnStatus:
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       mytime=self._getms()
       sleepMethod=sleepMethod or self._sleep
@@ -678,19 +914,37 @@ class flaskJSONRPCServer:
       if returnStatus: return False
 
    def _deepLock(self):
+      """
+      This method locks the server completely, the server doesn't process requests.
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       self.deepLocked=True
 
    def _deepUnlock(self):
+      """
+      This method unlocks the server completely.
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       self.deepLocked=False
 
    def _deepWait(self):
+      """
+      This method waits while server be locked.
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       while self.deepLocked:
          self._sleep(self.setts.sleepTime_waitDeepLock)
 
    def _reload(self, api, clearOld=False, timeout=60, processingDispatcherCountMax=0, safely=True):
+      """
+      This method  overload server's source without stopping.
+
+      :param list|dict api:
+      :param bool clearOld:
+      :param int timeout:
+      :param int processingDispatcherCountMax:
+      :param bool safely:
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       self._deepLock()
       mytime=self._getms()
@@ -725,6 +979,23 @@ class flaskJSONRPCServer:
       self._deepUnlock()
 
    def reload(self, api, clearOld=False, timeout=60, processingDispatcherCountMax=0, safely=True):
+      """
+      This method is wrapper above <server>._reload(). It overload server's source without stopping.
+
+      :param list(dict) api: {
+         'dispatcher':str() or <functiom>, # dispatcher's name (replace next param) or link to function (that will be loaded)
+         'dispatcherName':str(), # name of dispatcher that will overloaded
+         'scriptPath':str(), # path to source, that must be loaded
+         'scriptName':str(), # don't use it
+         'isInstance':bool(), # is passed dispatcher instance of class
+         'overload':list(), # overload this attrs in source or call this function
+         'path':str() #
+         }
+      :param bool clearOld:
+      :param int timeout:
+      :param int processingDispatcherCountMax:
+      :param bool safely:
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       api2=api if self._isArray(api) else [api]
       mArr={}
@@ -742,23 +1013,31 @@ class flaskJSONRPCServer:
          name=o.get('dispatcherName', None)
          # start importing new code
          if scriptPath and dispatcherName and self._isString(dispatcherName):
+            # passed path to module and name of dispatcher
             if exclusiveModule:
                module=imp.load_source(scriptName, scriptPath)
             else:
                if '%s_%s'%(scriptName, scriptPath) not in mArr:
                   mArr['%s_%s'%(scriptName, scriptPath)]={'module':imp.load_source(scriptName, scriptPath), 'dArr':{}}
+                  if scriptPath==self._getScriptPath(True) or scriptPath==self._getScriptPath(True, False):
+                     # passed parent module
+                     self._parentModule=mArr['%s_%s'%(scriptName, scriptPath)]['module']
                module=mArr['%s_%s'%(scriptName, scriptPath)]['module']
             if exclusiveDispatcher or '%s_%s'%(scriptName, scriptPath) not in mArr:
+               # module not imported yet
                dispatcher=getattr(module, dispatcherName)
             else:
+               # imported module, use it
                if dispatcherName not in mArr['%s_%s'%(scriptName, scriptPath)]['dArr']:
+                  # dispatcher not imported yet
                   mArr['%s_%s'%(scriptName, scriptPath)]['dArr'][dispatcherName]=getattr(module, dispatcherName)
                   if isInstance:
                      mArr['%s_%s'%(scriptName, scriptPath)]['dArr'][dispatcherName]=mArr['%s_%s'%(scriptName, scriptPath)]['dArr'][dispatcherName]()
                dispatcher=mArr['%s_%s'%(scriptName, scriptPath)]['dArr'][dispatcherName]
          elif name and self._isFunction(dispatcherName):
+            # passed function as new (or existed) dispatcher
             dispatcher=dispatcherName
-            module=dispatcher
+            module=dispatcherName
          else:
             self._throw('Incorrect data for "reload()"')
          # overloading with passed objects or via callback
@@ -800,6 +1079,17 @@ class flaskJSONRPCServer:
       self._thread(target=self._reload, kwargs={'api':api, 'clearOld':clearOld, 'timeout':timeout, 'processingDispatcherCountMax':processingDispatcherCountMax, 'safely':safely})
 
    def _callDispatcher(self, uniqueId, path, data, request, isJSONP=False, nativeThread=None, overload=None):
+      """
+      This method call dispatcher, requested by client.
+
+      :param str uniqueId: Unique ID of current request.
+      :param str path: Server's path, that client used for sending request.
+      :param list|dict data: Requst's params.
+      :param dict request: Reuest's and Enveronment's variables of WSGI or another backend.
+      :param bool isJSONP:
+      :param bool nativeThread:
+      :param dict|func overload: Overload <_connection> param.
+      """
       try:
          self.processingDispatcherCount+=1
          self._gcStats.processedDispatcherCount+=1
@@ -857,6 +1147,11 @@ class flaskJSONRPCServer:
          return False, params, self._getErrorInfo()
 
    def _controlGC(self, force=False):
+      """
+      This method collects garbage if one off specific conditions is True or if <force> is True.
+
+      :param bool force:
+      """
       if gc.isenabled() and self.settings.controlGC:
          gc.disable()
          self._logger('GC disabled by manual control')
@@ -884,7 +1179,12 @@ class flaskJSONRPCServer:
       self._gcStats.processedDispatcherCount=0
 
    def _compressResponse(self, resp):
-      # provide compression of response
+      """
+      This method compress responce.
+
+      :param Response() resp: Response object, prepared by WSGI backend.
+      :return Response():
+      """
       resp.direct_passthrough=False
       resp.data=self._compressGZIP(resp.data)
       resp.headers['Content-Encoding']='gzip'
@@ -893,7 +1193,12 @@ class flaskJSONRPCServer:
       return resp
 
    def _compressGZIP(self, data):
-      # provide compression
+      """
+      This method compress input data with gzip.
+
+      :param str data:
+      :return str:
+      """
       mytime=self._getms()
       gzip_buffer=StringIO()
       l=len(data)
@@ -906,6 +1211,12 @@ class flaskJSONRPCServer:
       return res
 
    def _uncompressGZIP(self, data):
+      """
+      This method uncompress input data with gzip.
+
+      :param str data:
+      :return str:
+      """
       mytime=self._getms()
       gzip_buffer=StringIO(data)
       f=GzipFile('', 'r', 0, gzip_buffer)
@@ -915,6 +1226,12 @@ class flaskJSONRPCServer:
       return res
 
    def _copyRequestContext(self, request):
+      """
+      This method create full copy of <request> in <dict> format (returned <dict> will not be thread-local variable).
+
+      :param Request() request:
+      :return dict:
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       # prepare for pickle
       #! #57 It must be on TYPE-based, not NAME-based
@@ -933,10 +1250,24 @@ class flaskJSONRPCServer:
       return r
 
    def _calcMimeType(self, request):
+      """
+      This method generate mime-type of response.
+
+      :param Request() request:
+      :return str:
+      """
       s=('text/javascript' if request.method=='GET' else 'application/json')
       return s
 
    def _requestHandler(self, path, method=None):
+      """
+      This method is callback, that will be called by WSGI or another backend for every request.
+      It implement error's handling of <server>._requestProcess() and some additional funtionality.
+
+      :param str path:
+      :param str method:
+      :return Response():
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       self.processingRequestCount+=1
       self._gcStats.processedRequestCount+=1
@@ -952,6 +1283,13 @@ class flaskJSONRPCServer:
       return res
 
    def _requestProcess(self, path, method):
+      """
+      This method implement all logic of proccessing requests.
+
+      :param str path:
+      :param str method:
+      :return Response():
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       # DeepLock
       self._deepWait()
@@ -1125,28 +1463,59 @@ class flaskJSONRPCServer:
       return resp
 
    def serveForever(self, restartOn=False, sleep=10):
+      """
+      This method is wrapper above <server>.start().
+      It implement logic, when this method block executing of source, placed below.
+
+      :Example:
+
+      >>> server=flaskJSONRPCServer(["127.0.0.1", "8080"])
+      >>> print "before serveForever"
+      >>> server.serveForever()
+      >>> print "after serveForever" # you never see this message, while server runned
+
+      :param bool restart:
+      :param int sleep:
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       if not restartOn and not self.settings.controlGC: self.start(joinLoop=True)
       else:
-         restartOn=restartOn if self._isArray(restartOn) else [restartOn]
+         if restartOn:
+            restartOn=restartOn if self._isArray(restartOn) else [restartOn]
          self.start(joinLoop=False)
          while True:
             self._sleep(sleep)
             if self.settings.controlGC: self._controlGC() # call GC manually
+            if not restartOn: continue
             for cb in restartOn:
-               if self._isFunction(cb) and cb(self) is not True: continue
+               if not cb: continue
+               elif self._isFunction(cb) and cb(self) is not True: continue
                elif cb=='checkFileDescriptor' and not self._checkFileDescriptor(multiply=1.25): continue
                self.restart(joinLoop=False)
                break
 
    def _startExecBackends(self):
+      """
+      This merhod run all execute backends of server.
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       # start execBackends
       for _id, bck in self.execBackend.items():
          if hasattr(bck, 'start'): bck.start(self)
 
+   def getWSGI(self):
+      """
+      This method return WSGI-app of server.
+      """
+      return self.flaskApp.wsgi_app
+
    def start(self, joinLoop=False):
-      """ Start server's loop """
+      """
+      This method start all execute backends of server, then start serving backend (werkzeug or pywsgi for now).
+      If <joinLoop> is True, current thread join serving-thread.
+
+      :param bool joinLoop:
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       # start execBackends
       self._startExecBackends()
@@ -1178,9 +1547,9 @@ class flaskJSONRPCServer:
             #       return func(*args, **kw)
             #    return bar
             # ssl.wrap_socket=sslwrap(ssl.wrap_socket)
-            self._server=WSGIServer(bindAdress, self.flaskApp, log=('default' if self.setts.debug else False), spawn=self._serverPool, keyfile=self.setts.ssl[0], certfile=self.setts.ssl[1], ssl_version=ssl.PROTOCOL_TLSv1_2) #ssl.PROTOCOL_SSLv23
+            self._server=WSGIServer(bindAdress, self.getWSGI(), log=('default' if self.setts.debug else False), spawn=self._serverPool, keyfile=self.setts.ssl[0], certfile=self.setts.ssl[1], ssl_version=ssl.PROTOCOL_TLSv1_2) #ssl.PROTOCOL_SSLv23
          else:
-            self._server=WSGIServer(bindAdress, self.flaskApp, log=('default' if self.setts.debug else False), spawn=self._serverPool)
+            self._server=WSGIServer(bindAdress, self.getWSGI(), log=('default' if self.setts.debug else False), spawn=self._serverPool)
          if self.setts.blocking: self._logger('WARNING: blocking mode not implemented for gevent')
          if joinLoop: self._server.serve_forever()
          else: self._server.start()
@@ -1202,6 +1571,12 @@ class flaskJSONRPCServer:
          if joinLoop: self._server.join()
 
    def _werkzeugStop(self):
+      """
+      This method implement hack for stopping flask's "werkzeug" WSGI backend.
+      For more info see http://flask.pocoo.org/snippets/67/.
+
+      :return str|None: Error message if some problems happened.
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       try:
          token1=request.args.get('token', '')
@@ -1215,14 +1590,27 @@ class flaskJSONRPCServer:
       except Exception, e: return e
 
    def _stopExecBackends(self, timeout=20, processingDispatcherCountMax=0):
+      """
+      This merhod stop all execute backends of server.
+      For more info see <server>._waitProcessingDispatchers().
+
+      :param int timeout:
+      :param int processingDispatcherCountMax:
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
-      # stop execBackends
       mytime=self._getms()
       for _id, bck in self.execBackend.items():
          if hasattr(bck, 'stop'):
             bck.stop(self, timeout=timeout-(self._getms()-mytime)/1000.0, processingDispatcherCountMax=processingDispatcherCountMax)
 
    def _waitProcessingDispatchers(self, timeout=20, processingDispatcherCountMax=0):
+      """
+      This method try to wait (for <timeout> seconds), while currently runed dispatchers will be done.
+      If <processingDispatcherCountMax> is not 0, this check skip this nuber of runned dispatchers.
+
+      :param int timeout:
+      :param int processingDispatcherCountMax:
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       mytime=self._getms()
       if processingDispatcherCountMax is not False:
@@ -1233,6 +1621,13 @@ class flaskJSONRPCServer:
             self._sleep(self.setts.sleepTime_checkProcessingCount)
 
    def stop(self, timeout=20, processingDispatcherCountMax=0):
+      """
+      This method stop all execute backends of server, then stop serving backend (werkzeug or pywsgi for now).
+      For more info see <server>._waitProcessingDispatchers().
+
+      :param int timeout:
+      :param int processingDispatcherCountMax:
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       self._deepLock()
       mytime=self._getms()
@@ -1259,6 +1654,16 @@ class flaskJSONRPCServer:
       self._deepUnlock()
 
    def restart(self, timeout=20, processingDispatcherCountMax=0, werkzeugTimeout=3, joinLoop=False):
+      """
+      This method call <server>.stop() and then <server>.start().
+      For flask's "werkzeug" WSGI backend it wait for <werkzeugTimeout> seconds after <server>.stop() for avoiding error "adress already in use".
+      For more info see <server>._waitProcessingDispatchers().
+
+      :param int timeout:
+      :param int processingDispatcherCountMax:
+      :param int werkzeugTimeout:
+      :param bool joinLoop:
+      """
       if self._inChild(): self._throw('This method can be called only from <main> process')
       self.stop(timeout=timeout, processingDispatcherCountMax=processingDispatcherCountMax)
       if not self.setts.gevent: #! Without this werkzeug throw "adress already in use"
@@ -1314,568 +1719,6 @@ class flaskJSONRPCServer:
    #    #       stunnelLog=self._fileGet(logPath)
    #    # thread_checkSSLTunnel=threading.Thread(target=checkSSLTunnel).start()
    #    return stunnel
-
-class execBackend_threaded:
-   def __init__(self, poolSize=5, sleepTime_emptyQueue=0.02, sleepTime_cicleWait=0.02, id='execBackend_threaded', forceNative=False):
-      self.settings=magicDict({
-         'poolSize':poolSize,
-         'sleepTime_emptyQueue':sleepTime_emptyQueue,
-         'sleepTime_cicleWait':sleepTime_cicleWait,
-         'forceNative':forceNative
-      })
-      from collections import deque
-      self.queue=deque()
-      self._poolSize=0
-      self._id=id
-      if forceNative: self._id+='Native'
-      self._mainCicleThread=None
-
-   def start(self, server):
-      if self._mainCicleThread: return
-      if self.settings.forceNative and server.setts.gevent:
-         server._logger('Warning: notifBackend forced to use Native Threads')
-      self._parentServer=server
-      self._mainCicleThread=server._thread(self.mainCicle)
-
-   def mainCicle(self):
-      #main cicle for processing notifs. Run on strating backend
-      while True:
-         self._parentServer._deepWait()
-         self._parentServer._sleep(self.settings.sleepTime_cicleWait)
-         if not len(self.queue): continue
-         tArr1=self.queue.popleft()
-         mytime=self._parentServer._getms()
-         while self._poolSize>=self.settings.poolSize:
-            self._parentServer._sleep(self.settings.sleepTime_emptyQueue)
-         self._poolSize+=1
-         self._parentServer._speedStatsAdd('notifBackend_wait', self._parentServer._getms()-mytime)
-         isForceNative=self.settings.forceNative and self._parentServer.setts.gevent
-         self._parentServer._thread(self.childExecute, args=[tArr1, isForceNative or not(self._parentServer.setts.gevent)], forceNative=isForceNative)
-
-   def childExecute(self, p, nativeThread=False):
-      status, params, result=self._parentServer._callDispatcher(p['uniqueId'], p['path'], p['dataIn'], p['request'], nativeThread=nativeThread, isJSONP=p.get('isJSONP', False))
-      if not status:
-         self._parentServer._logger('ERROR in notifBackend._callDispatcher():', result)
-         print '!!! ERROR_processing', result
-      self._poolSize-=1
-
-   def add(self, uniqueId, path, dataIn, request, isJSONP=False):
-      #callback for adding notif to queue
-      try:
-         self.queue.append({'uniqueId':uniqueId, 'isJSONP':isJSONP, 'path':path, 'dataIn':dataIn, 'request':request, 'mytime':self._parentServer._getms()})
-         return True, len(self.queue)
-      except Exception, e:
-         print '!!! ERROR _notifBackend_threadPool_add', e
-         return None, str(e)
-
-   def stats(self, inMS=False):
-      r={
-         '%s_queue'%self._id:len(self.queue)
-      }
-      return r
-
-class execBackend_parallelWithSocket:
-   def __init__(self, poolSize=1, importGlobalsFromParent=True, parentGlobals=None, sleepTime_resultCheck=0.15, sleepTime_emptyQueue=0.1, sleepTime_waitLock=0.75, sleepTime_lazyRequest=2*60*1000, sleepTime_checkPoolStopping=0.3, allowThreads=True, id='execBackend_parallelWithSocket', socketPath=None, saveResult=True, persistent_queueGet=True, useCPickle=False):
-      self.settings=magicDict({
-         'poolSize':poolSize,
-         'sleepTime_resultCheck':sleepTime_resultCheck,
-         'sleepTime_emptyQueue':sleepTime_emptyQueue,
-         'sleepTime_waitLock':sleepTime_waitLock,
-         'sleepTime_lazyRequest':sleepTime_lazyRequest,
-         'sleepTime_checkPoolStopping':sleepTime_checkPoolStopping,
-         'importGlobalsFromParent':importGlobalsFromParent,
-         'allowThreads':allowThreads,
-         'lazyRequestChunk':1000,
-         'saveResult':saveResult,
-         'persistent_queueGet':persistent_queueGet,
-         'useCPickle':useCPickle
-      })
-      from collections import deque
-      self.parentGlobals=parentGlobals or {}
-      self.queue=deque()
-      self._pool=[]
-      self._server=None
-      self._id=id
-      if not saveResult: self._id+='NoResult'
-      self.result={}
-      self.socketPath=socketPath
-      self._forceStop=False
-      self._jsonBackend=None
-      if useCPickle:
-         #! try http://stackoverflow.com/a/15108940
-         import cPickle
-         self._jsonBackend=magicDict({
-            'dumps': lambda data, **kwargs: cPickle.dumps(data),
-            'loads': lambda data, **kwargs: cPickle.loads(data)
-         })
-
-   def start(self, server):
-      if self._server: return
-      if not server.setts.gevent:
-         server._throw('ExecBackend "parallelWithSocket" not implemented for Flask backend yet')
-      # warnings
-      if self.settings.useCPickle: server._logger('WARNING: cPickle is slow backend')
-      # choise json-backend
-      if self._jsonBackend is None: self._jsonBackend=server.jsonBackend
-      # generate socket-file
-      if not self.socketPath:
-         self.socketPath='%s/.%s.%s.sock'%(server._getScriptPath(), server._getScriptName(withExt=False), self._id)
-      if os.path.exists(self.socketPath): os.remove(self.socketPath)
-      # generate access token
-      self.token='--'.join([str(int(random.random()*999999)) for i in xrange(10)])
-      # import parent's globals if needed
-      if self.settings.importGlobalsFromParent:
-         server._importGlobalsFromParent(scope=self.parentGlobals)
-      # patching
-      from gevent import monkey
-      monkey.patch_all(sys=False, os=False, thread=False, time=False, ssl=False, socket=False) #! "os" may cause some problems with multiprocessing. but better get original objects in execBackend
-      server._importAll(forceDelete=True)
-      # start processesPool
-      """
-      if this block go after starting new API, server has really strange problems with "doubled" variables and etc.
-      But if this code go before "self._server.start()", all work fine.
-      I not understand why this happened and i spend more then two days for debugging.
-      """
-      import multiprocessing
-      for i in xrange(self.settings.poolSize): # multiprocessing.cpu_count()
-         p=multiprocessing.Process(target=self.childCicle, args=(server, ))
-         p.start()
-         self._pool.append(p)
-      # create api on unix-socket
-      self._parentServer=server
-      listener=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-      listener.bind(self.socketPath)
-      listener.listen(1)
-      #select compression settings
-      allowCompress=False
-      compressMinSize=100*1024*1024
-      if server.settings.experimental and experimentalPack.use_moreAsync and '_compressGZIP' in experimentalPack.moreAsync_methods: allowCompress=True
-      #start API
-      self._server=flaskJSONRPCServer([self.socketPath, listener], blocking=False, cors=False, gevent=server.setts.gevent, debug=False, log=server.settings.log, fallback=False, allowCompress=allowCompress, compressMinSize=compressMinSize, jsonBackend=self._jsonBackend, tweakDescriptors=None, notifBackend='simple', dispatcherBackend='simple', experimental=server.settings.experimental)
-      self._server.setts.antifreeze_batchMaxTime=1*1000
-      self._server.setts.antifreeze_batchBreak=False
-      self._server.setts.antifreeze_batchSleep=1
-      self._server.registerFunction(self.api_queueGet, path='/queue', name='get')
-      self._server.registerFunction(self.api_queueResult, path='/queue', name='result')
-      self._server.registerFunction(self.api_parentEval, path='/parent', name='eval')
-      self._server.registerFunction(self.api_parentVarCheck, path='/parent', name='varCheck')
-      self._server.registerFunction(self.api_parentStats, path='/parent', name='stats')
-      self._server.registerFunction(self.api_parentLock, path='/parent', name='lock')
-      self._server.registerFunction(self.api_parentWait, path='/parent', name='wait')
-      self._server.registerFunction(self.api_parentUnlock, path='/parent', name='unlock')
-      self._server.registerFunction(self.api_parentSpeedStatsAdd, path='/parent', name='speedStatsAdd')
-      self._server.start()
-
-   def stop(self, server, timeout=20, processingDispatcherCountMax=0):
-      # stop process's pool
-      mytime=server._getms()
-      self._forceStop=True
-      while True:
-         server._sleep(self.settings.sleepTime_checkPoolStopping)
-         tArr=[p for p in self._pool if p.is_alive()]
-         if not len(tArr): break
-         elif timeout and server._getms()-mytime>=timeout*1000:
-            for p in tArr:
-               try: p.terminate()
-               except Exception, e: pass
-            break
-      self._pool=[]
-      self._forceStop=False
-      # stop api
-      self._server.stop(timeout=timeout-(server._getms()-mytime)/1000.0)
-      self._server=None
-
-   def sendRequest(self, path, method, params=None, notif=False):
-      mytime=self._server._getms()
-      if params is None: params=[]
-      if self._server._isArray(method): #always like notify-batch
-         data=[{'jsonrpc': '2.0', 'method': v['method'], 'params':v['params']} for v in method]
-      else:
-         data={'jsonrpc': '2.0', 'method': method, 'params':params}
-         if not notif: #like notif
-            data['id']=int(random.random()*999999)
-      try: data=self._parentServer._serializeJSON(data)
-      except Exception, e:
-         self._parentServer._throw('Cant serialize JSON: %s'%(e))
-      _conn=self._conn if self._conn is not None else UnixHTTPConnection(self.socketPath)
-      for i in xrange(10):
-         try:
-            _conn.request('POST', path, data, {'Token':self.token, 'Accept-encoding':'gzip'})
-            if self._conn is not None: self._conn=_conn
-            break
-         except Exception: pass
-         self._parentServer._sleep(1)
-         _conn=UnixHTTPConnection(self.socketPath)
-      else: self._parentServer._throw('Cant connect to backend-API:'%self.socketPath)
-      resp=_conn.getresponse()
-      data2=resp.read()
-      if notif or self._server._isArray(method):
-         if not self._server._isArray(method) and method!='speedStatsAdd':
-            self._parentServer._speedStatsAdd(method, self._server._getms()-mytime)
-         return
-      if resp.getheader('Content-Encoding', None)=='gzip':
-         data2=self._parentServer._uncompressGZIP(data2)
-      data2=self._parentServer._parseJSON(data2)
-      if method!='speedStatsAdd':
-         self._parentServer._speedStatsAdd(method, self._server._getms()-mytime)
-      if not self._server._isDict(data2): return None
-      elif data2.get('error', None):
-         self._parentServer._throw('Error %s: %s'%(data2['error']['code'], data2['error']['message']))
-      return data2.get('result', None)
-
-   def sendRequestEx(self, data, async=False, cb=None, returnAllData=False):
-      # helper
-      def tFunc(self, data, async, cb):
-         data['error']=None
-         try:
-            data['result']=self.sendRequest(data.get('path', '/'), data['method'], data['params'], notif=async)
-         except Exception, e:
-            data['result']=None
-            data['error']=e
-         if self._server._isFunction(cb): cb(data, self)
-         elif data['error']: self._parentServer._throw(data['error'])
-         return (data if returnAllData else data['result'])
-      # process request
-      if async and self._server._isFunction(cb): #fully async with callback
-         if not self.settings.allowThreads:
-            self._parentServer._logger('Fully async request only supported, if allowThreads==True')
-         self._parentServer._thread(tFunc, args=[self, data, False, cb])
-      else: # simple request
-         return tFunc(self, data, async, cb)
-
-   def childCicle(self, parentServer):
-      self._parentServer=parentServer
-      self._conn=None
-      self._lazyRequest={}
-      self._lazyRequestLatTime=None
-      self._server=flaskJSONRPCServer(['', ''], gevent=parentServer.setts.gevent, log=parentServer.setts.log, jsonBackend=self._jsonBackend, tweakDescriptors=None, experimental=parentServer.settings.experimental) #we need this dummy for some methods from it
-      if not self.settings.allowThreads:
-         # if threads not allowed, we don't need gevent in child
-         parentServer.setts.gevent=False
-         parentServer._importAll(forceDelete=True)
-         # in threaded mode (also gevent) we can't use same socket for read and write
-         self._conn=UnixHTTPConnection(self.socketPath)
-      # create hashmap for parentGlobals
-      self.parentGlobalsMap={}
-      if self.settings.importGlobalsFromParent:
-         for k, v in self.parentGlobals.items():
-            self.parentGlobalsMap[k]=self.var2hash(v, k)
-      # overload some methods in parentServer
-      self.childDisableNotImplemented()
-      parentServer.stats=lambda inMS=False: self.sendRequest('/parent', 'stats', [inMS])
-      parentServer.lock=lambda dispatcher=None: self.sendRequest('/parent', 'lock', [(None if dispatcher is None else dispatcher._id)])
-      parentServer.unlock=lambda dispatcher=None, exclusive=False: self.sendRequest('/parent', 'unlock', [(None if dispatcher is None else dispatcher._id), exclusive])
-      parentServer.wait=self.childWait
-      parentServer._speedStatsAdd=self.childSpeedStatsAdd
-      # main cicle
-      while True:
-         self.childSendLazyRequest()
-         p=self.sendRequest('/queue', 'get')
-         if p=='__stop__': sys.exit(0)
-         elif p:
-            if self.settings.allowThreads:
-               parentServer._thread(self.childCallDispatcher, args=[p])
-            else: self.childCallDispatcher(p)
-            continue
-         if not self.settings.persistent_queueGet: # pause only need for non-persistent-mode
-            parentServer._sleep(self.settings.sleepTime_emptyQueue)
-
-   def childSendLazyRequest(self):
-      if self._lazyRequestLatTime is None: self._lazyRequestLatTime=self._server._getms()
-      if self._lazyRequestLatTime is not True and self._server._getms()-self._lazyRequestLatTime<self.settings.sleepTime_lazyRequest: return
-      for rId, v in self._lazyRequest.items():
-         if not len(v): continue
-         path=self._server._strGet(rId, '', '<')
-         self._lazyRequest[rId]=v[self.settings.lazyRequestChunk:]
-         self.sendRequest(path, v[:self.settings.lazyRequestChunk])
-         if len(v)>self.settings.lazyRequestChunk:
-            self._lazyRequestLatTime=True #shedule to next call
-            return
-      self._lazyRequestLatTime=self._server._getms()
-
-   def childCallDispatcher(self, p):
-      self._server._logger('Processing with backend "parallelWithSocket": %s()'%(p['dataIn']['method']))
-      p['request']=magicDict(p['request']) # _callDispatcher() work with this like object, not dict
-      status, params, result=self._parentServer._callDispatcher(p['uniqueId'], p['path'], p['dataIn'], p['request'], overload=self.childConnectionOverload, nativeThread=self.settings.allowThreads and not(self._parentServer.setts.gevent), isJSONP=p.get('isJSONP', False))
-      if not self.settings.saveResult: return
-      # prepare for pickle
-      #! #57 It must be on TYPE-based, not NAME-based
-      convBlackList=['server', 'call', 'dispatcher']
-      # convWhitelist=['cookies', 'cookiesOut', 'ip', 'notify', 'jsonp', 'path', 'parallelType', 'parallelPoolSize', 'headersOut', 'dispatcherName', 'headers', 'nativeThread', 'allowCompress']
-      if '_connection' in params:
-         params['_connection']=dict([(k,v) for k,v in params['_connection'].items() if k not in convBlackList])
-      self.sendRequest('/queue', 'result', [p['uniqueId'], status, params, result])
-
-   def childWait(self, dispatcher=None, sleepMethod=None, returnStatus=False):
-      # parentServer.wait() is more complicated, becose it must check lock-status in parent, but suspend child
-      sleepMethod=sleepMethod or self._parentServer._sleep
-      while self.sendRequest('/parent', 'wait', [(None if dispatcher is None else dispatcher._id)]):
-         if returnStatus: return True
-         sleepMethod(self.settings.sleepTime_waitLock)
-      if returnStatus: return False
-
-   def childSpeedStatsAdd(self, name, val):
-      rId='/%s/<%s>'%('parent', 'speedStatsAdd')
-      if rId not in self._lazyRequest: self._lazyRequest[rId]=[]
-      if not len(self._lazyRequest[rId]):
-         self._lazyRequest[rId].append({'path':'/parent', 'method':'speedStatsAdd', 'params':[[], []]})
-      self._lazyRequest[rId][0]['params'][0].append('execBackend_%s'%name)
-      self._lazyRequest[rId][0]['params'][1].append(val)
-
-   def childConnectionOverload(self, _connection):
-      # some overloads in _callDispatcher()._connection
-      _connection['parallelType']='parallelWithSocket'
-      _connection['parallelPoolSize']=self.settings.poolSize
-      # wrap methods for passing "_connection" object
-      _connection['call']['execute']=lambda code, scope=None, wait=True, cb=None: self.childEval(code, scope=scope, wait=wait, cb=cb, isExec=True, _connection=magicDict(_connection))
-      _connection['call']['eval']=lambda code, scope=None, wait=True, cb=None: self.childEval(code, scope=scope, wait=wait, cb=cb, isExec=False, _connection=magicDict(_connection))
-      _connection['call']['copyGlobal']=lambda var, actual=True, cb=None: self.childCopyGlobal(var, actual=actual, cb=cb, _connection=magicDict(_connection))
-      return _connection
-
-   def childDisableNotImplemented(self):
-      # disable none-implemented methods in parentServer
-      whiteList=['_callDispatcher', '_checkFileDescriptor', '_compressResponse', '_compressGZIP', '_uncompressGZIP', '_copyRequestContext', '_countFileDescriptor', '_fileGet', '_fileWrite', '_fixJSON', '_formatPath', '_getErrorInfo', '_getms', '_getScriptName', '_getScriptPath', '_getServerUrl', '_import', '_importAll', '_importSocket', '_importThreading', '_inChild', '_isArray', '_isDict', '_isFunction', '_isInstance', '_isNum', '_isString', '_logger', '_parseJSON', '_parseRequest', '_prepResponse', '_serializeJSON', '_sha1', '_sha256', '_strGet', '_throw', '_tweakLimit', 'fixJSON', '_sleep', '_thread', '_randomEx', '_controlGC', '_countMemory', '_calcMimeType']
-      for name in dir(self._parentServer):
-         if not self._parentServer._isFunction(getattr(self._parentServer, name)): continue
-         if name not in whiteList:
-            s='Method "%s" not implemented in parallel backend'%(name)
-            setattr(self._parentServer, name, lambda __msg=s, *args, **kwargs: self._parentServer._throw(__msg))
-
-   def childEval(self, code, scope=None, wait=True, cb=None, isExec=False, _connection=None):
-      def tFunc(o, self):
-         o['cb'](o['result'], o['error'], _connection)
-      data={'path':'/parent', 'method':'eval', 'params':[code, scope, isExec], 'cb':cb}
-      self.sendRequestEx(data, async=not(wait), cb=(tFunc if self._server._isFunction(cb) else None))
-
-   def childCopyGlobal(self, var, actual=True, cb=None, _connection=None):
-      # if callback passed, method work in async mode
-      vars=var if self._server._isArray(var) else [var]
-      res={}
-      if not actual and self.settings.importGlobalsFromParent:
-         # get from cache without checking
-         for k in vars:
-            res[k]=self.parentGlobals.get(k, None)
-            self._server._logger('CopyGlobal var "%s": without checking'%k)
-         if self._server._isFunction(cb):
-            cb((res if self._server._isArray(var) else res.values()[0]), False, _connection)
-      else:
-         hashs=[self.parentGlobalsMap.get(k, None) for k in vars]
-         data={'path':'/parent', 'method':'varCheck', 'params':[hashs, vars, True], 'cb':cb, 'onlyOne':not(self._server._isArray(var))}
-         def tFunc(data, self):
-            if data['error']:
-               if self._server._isFunction(data['cb']):
-                  return data['cb'](None, data['error'], _connection)
-               else: self._parentServer._throw(data['error'])
-            res={}
-            for k, r in data['result'].items():
-               if not r[0]: # not changed
-                  res[k]=self.parentGlobals.get(k, None)
-                  self._server._logger('CopyGlobal var "%s": not changed'%k)
-               elif r[1] is None: # not founded or not hashable
-                  res[k]=None
-                  if k in self.parentGlobals:
-                     del self.parentGlobalsMap[k]
-                     del self.parentGlobals[k]
-                  self._server._logger('CopyGlobal var "%s": not founded or not hashable'%k)
-               else: # changed
-                  v=r[2]
-                  # need to deseriolize value
-                  v=self._server._parseJSON(v)
-                  res[k]=v
-                  self.parentGlobalsMap[k]=r[1]
-                  self.parentGlobals[k]=v
-                  self._server._logger('CopyGlobal var "%s": changed'%k)
-            if self._server._isFunction(data['cb']):
-               data['cb']((res if not data['onlyOne'] else res.values()[0]), False, _connection)
-            else: data['result']=res
-         res=self.sendRequestEx(data, async=self._server._isFunction(cb), cb=tFunc)
-         if self._server._isFunction(cb): return
-      return (res if self._server._isArray(var) else res.values()[0])
-
-   def childRemoteVar(self, name, default=None, clear=False):
-      val=default
-      if clear: #непроверяя устанавливаем на сервере в значение default
-         pass
-      else: #проверяем значение на сервере. если переменной нет, устанавливаем значение в default
-         pass
-      #prepare callbacks
-      def tFunc_get(w, k):
-         if k not in ('_val', '_type'):
-            print '!! Unknown property', k
-            return
-         pass
-      def tFunc_set(w, k, v):
-         if k not in ('_val', '_type'):
-            print '!! Unknown property', k
-            return
-         pass
-      #prepare var's wrapper
-      v=virtVar(val, saveObj=False, cbGet=tFunc_get, cbSet=tFunc_set)
-      v._getattrWhitemap+=['_oldType', '_oldHash', '_oldVal']
-      v._oldVal=val
-      v._oldType=type(val)
-      v._oldHash=self.var2hash(val, name)
-      return v
-
-   def var2hash(self, var, name, returnSerialized=False):
-      try:
-         s=self._server._serializeJSON(var)
-         h=self._server._sha256(s)
-         if returnSerialized: return h, s
-         else: return h
-      except Exception, e:
-         self._server._logger('Cant hash variable "%s": %s'%(name, e))
-         if returnSerialized: return None, None
-         else: return None
-
-   def api_queueGet(self, _connection=None):
-      if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
-         self._parentServer._throw('Access denied') # tokens not match
-      # get task
-      if self._forceStop: return '__stop__'
-      elif not len(self.queue):
-         if not self.settings.persistent_queueGet: return None
-         else:
-            while not len(self.queue):
-               self._server._sleep(self.settings.sleepTime_emptyQueue)
-      tArr1=self.queue.popleft()
-      self._parentServer.processingDispatcherCount+=1
-      return tArr1
-
-   def api_queueResult(self, uniqueId, status, params, result, _connection=None):
-      if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
-         self._parentServer._throw('Access denied') # tokens not match
-      # set task's result
-      if not self.settings.saveResult: return
-      if params and '_connection' in params: # _requestHandler() work with this like object, not dict
-         params['_connection']=magicDict(params['_connection'])
-      self.result[uniqueId]=[status, params, result]
-      self._parentServer.processingDispatcherCount-=1
-
-   def api_parentStats(self, inMS, _connection=None):
-      if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
-         self._parentServer._throw('Access denied') # tokens not match
-      return self._parentServer.stats(inMS=inMS)
-
-   def api_parentEval(self, code, scope=None, isExec=False, _connection=None):
-      if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
-         self._server._throw('Access denied') # tokens not match
-      # eval code in parent process
-      try:
-         scope=scope if scope is None else scope
-         if scope and not self._server._isDict(scope): # scope passed as names
-            scope=scope if self._server._isArray(scope) else [scope]
-            tArr={}
-            for s in scope:
-               if s=='_globals': tArr.update(self.parentGlobals)
-               elif self._server._isDict(s): tArr.update(s)
-               elif self._server._isString(s): tArr[s]=self.parentGlobals.get(s, None)
-            scope=tArr
-         if scope is None:
-            scope={}
-            self._parentServer._importGlobalsFromParent(scope=scope)
-         scope['__server__']=self._parentServer # add server instance to scope
-         s=compile(code, '<string>', 'exec' if isExec else 'eval')
-         res=eval(s, scope)
-      except Exception, e:
-         self._server._throw('Cant execute code: %s'%(e))
-      return res
-
-   def api_parentVarCheck(self, hashs, vars, returnIfNotMatch, _connection=None):
-      if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
-         self._server._throw('Access denied') # tokens not match
-      if len(hashs)!=len(vars):
-         self._server._throw('Wrong length')
-      if not self._server._isArray(hashs) or not self._server._isArray(vars):
-         self._server._throw('Arguments "vars" and "hashs" must be array')
-      scope={}
-      # typeOf=[IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, DictType, ListType, TupleType]
-      self._parentServer._importGlobalsFromParent(scope=scope)
-      res={}
-      for i, k in enumerate(vars):
-         vHash=hashs[i]
-         if k not in scope: res[k]=[True, None, None]
-         else:
-            vv=scope[k]
-            # for faster processing, we save serialized var and pass to response it, not original var
-            vvHash, vvCache=self.var2hash(vv, k, returnSerialized=True)
-            if vvHash is None: res[k]=[True, None, None]
-            elif vHash!=vvHash:
-               res[k]=[True, vvHash, (vvCache if returnIfNotMatch else None)]
-            else: res[k]=[False, hash, None]
-      return res
-
-   def api_parentLock(self, dispatcherId=None, _connection=None):
-      if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
-         self._parentServer._throw('Access denied') # tokens not match
-      if dispatcherId is None: dispatcher=None
-      elif not self._parentServer._isDict(dispatcherId) or 'path' not in dispatcherId or 'name' not in dispatcherId:
-         self._parentServer._throw('Wrong dispatcherId: %s'%dispatcherId)
-      else:
-         dispatcher=self._parentServer.routes[dispatcherId['path']][dispatcherId['name']]['link']
-      self._parentServer.lock(dispatcher=dispatcher)
-
-   def api_parentWait(self, dispatcherId=None, _connection=None):
-      if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
-         self._parentServer._throw('Access denied') # tokens not match
-      if dispatcherId is None: dispatcher=None
-      elif not self._server._isDict(dispatcherId) or 'path' not in dispatcherId or 'name' not in dispatcherId:
-         self._server._throw('Wrong dispatcherId: %s'%dispatcherId)
-      else:
-         dispatcher=self._parentServer.routes[dispatcherId['path']][dispatcherId['name']]['link']
-      s=self._parentServer.wait(dispatcher=dispatcher, returnStatus=True)
-      return s
-
-   def api_parentUnlock(self, dispatcherId=None, exclusive=False, _connection=None):
-      if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
-         self._parentServer._throw('Access denied') # tokens not match
-      if dispatcherId is None: dispatcher=None
-      elif not self._parentServer._isDict(dispatcherId) or 'path' not in dispatcherId or 'name' not in dispatcherId:
-         self._parentServer._throw('Wrong dispatcherId: %s'%dispatcherId)
-      else:
-         dispatcher=self._parentServer.routes[dispatcherId['path']][dispatcherId['name']]['link']
-      self._parentServer.unlock(dispatcher=dispatcher, exclusive=exclusive)
-
-   def api_parentSpeedStatsAdd(self, name, val, _connection=None):
-      if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
-         self._parentServer._throw('Access denied') # tokens not match
-      self._parentServer._speedStatsAdd(name, val)
-
-   def add(self, uniqueId, path, dataIn, request, isJSONP=False):
-      #callback for adding request to queue
-      try:
-         self.queue.append({'uniqueId':uniqueId, 'isJSONP':isJSONP, 'path':path, 'dataIn':dataIn, 'request':request, 'mytime':self._parentServer._getms()})
-         return True, len(self.queue)
-      except Exception, e:
-         print '!!! ERROR execBackend_parallelWithSocket.add', e
-         return None, str(e)
-
-   def check(self, uniqueId):
-      if not self.settings.saveResult: return None, None, 'saveResult==False'
-      mytime=self._parentServer._getms()
-      while uniqueId not in self.result:
-         self._parentServer._sleep(self.settings.sleepTime_resultCheck)
-      self._parentServer._speedStatsAdd('execBackend_check', self._parentServer._getms()-mytime)
-      tArr=self.result[uniqueId]
-      del self.result[uniqueId]
-      return tArr[0], tArr[1], tArr[2] # status, params, result
-
-   def stats(self, inMS=False):
-      r={
-         '%s_queue'%self._id:len(self.queue),
-         '%s_api'%self._id:self._server.stats(inMS=inMS)
-      }
-      return r
-
-# declaring map of exec-backends
-execBackendMap={
-   'parallelWithSocket':lambda notif: execBackend_parallelWithSocket(saveResult=not(notif)),
-   'threaded':lambda notif: execBackend_threaded(),
-   'threadedNative':lambda notif: execBackend_threaded(forceNative=True)
-}
-# backward compatible
-execBackendMap['threadPool']=execBackendMap['threaded']
-execBackendMap['threadPoolNative']=execBackendMap['threadedNative']
 
 """REQUEST-RESPONSE SAMPLES
 --> {"jsonrpc": "2.0", "method": "subtract", "params": [42, 23], "id": 1}

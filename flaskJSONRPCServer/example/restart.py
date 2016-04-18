@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import sys, time, random
+
 """
 This example show how to stop or restart server.
 This function fully safe, waits for completing old requests,
@@ -34,7 +35,7 @@ if __name__=='__main__':
    #    <tweakDescriptors> set descriptor's limit for server
    #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
    #    <notifBackend>     set backend for Notify-requests
-   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000])
+   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=False, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000])
    # Register dispatchers for single functions
    server.registerFunction(echo, path='/api')
    server.registerFunction(restart, path='/api')

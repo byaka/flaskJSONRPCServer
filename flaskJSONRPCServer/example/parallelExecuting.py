@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import sys, time, random, os
+
 import sexyPrime
 
 from flaskJSONRPCServer import flaskJSONRPCServer
@@ -84,10 +85,12 @@ def testCopyGlobal_gen(_connection=None):
    # generate random data
    global testCopyGlobal
    testCopyGlobal=None
-   testCopyGlobal=[round((random.random()+0.01)*99, 2) for i in xrange(5*10**6)]
+   testCopyGlobal=[round((random.random()+0.01)*99, 2) for i in xrange(1*10**6)]
 
 def testCopyGlobal_async(_connection=None):
    # get data from global variable, but don't wait for completion (passing cb switch to async mode)
+   if not _connection.get('parallelType', False):
+      return '!! this metod for testind parallel exec-backend, but you dont use it !!'
    def tFunc(res, err, _connection):
       print '> From copyGlobal-callback', err, len(res)
    _connection.call.copyGlobal('testCopyGlobal', actual=True, cb=tFunc)
@@ -135,7 +138,7 @@ def sexyNum(n=None, _connection=None):
 
 def stats(_connection=None):
    #return server's speed stats
-   return _connection.server.stats(inMS=True) #inMS=True return stats in milliseconds
+   return _connection.server.stats(inMS=False) #inMS=True return stats in milliseconds
 
 if __name__=='__main__':
    print 'Running api..'
@@ -151,12 +154,6 @@ if __name__=='__main__':
    #    <tweakDescriptors> set descriptor's limit for server
    #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
    #    <notifBackend>     set backend for Notify-requests
-   from flaskJSONRPCServer import magicDict
-   # import ujson
-   # jsonBackend=magicDict({
-   #    'dumps': lambda data, **kwargs: ujson.dumps(data),
-   #    'loads': lambda data, **kwargs: ujson.loads(data)
-   # })
    server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', tweakDescriptors=[1000, 1000], dispatcherBackend='parallelWithSocket', notifBackend='simple', experimental=True)
    # Register dispatchers for single functions
    server.registerFunction(stats, path='/api', dispatcherBackend='simple')
@@ -180,9 +177,10 @@ if __name__=='__main__':
    server.registerFunction(testCopyGlobal_proc, path='/api')
    server.registerFunction(testCopyGlobal_async, path='/api')
 
-   # Run server
+   # Run server's loop in non-blocking mode
    server.start()
    while True:
+      # every second check var <needRestart> and if True, restart server
       server._sleep(1)
       if needRestart:
          needRestart=False

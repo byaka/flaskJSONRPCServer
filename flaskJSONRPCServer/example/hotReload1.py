@@ -30,7 +30,7 @@ def reloadApi(_connection=None):
    def tOverloadForClassInstance(server, module, dispatcher): dispatcher.data=myInstance.data
    tArr1=[
       {
-         'info':'reloadAndReplace.py',
+         'info':'hotReload1.py',
          'scriptPath':_connection.server._getScriptPath(True),
          'dispatcher':'mySharedMethods',
          'isInstance':True,
