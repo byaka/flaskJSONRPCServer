@@ -23,6 +23,9 @@ Requirements
 `How to install <#install>`__
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+`Documentation <https://byaka.github.io/flaskJSONRPCServer-docs/>`__
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 `About Gevent and async <#gevent-and-async>`__
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -72,8 +75,7 @@ Pros
 Cons
 ----
 
--  No **documentation**, only examples in package (sorry, i not have
-   time for now)
+-  Not fully **documentated**. For now only examples in package and `API documentation <https://byaka.github.io/flaskJSONRPCServer-docs/>`__.
 -  Lib not has **decorators**, so it not a "Flask-way" (this can be
    simply added, but i not use decorators, sorry)
 

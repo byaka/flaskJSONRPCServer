@@ -15,6 +15,7 @@ flaskJSONRPCServer resides on **github**. You can file issues or pull requests [
  - **Gevent** >= 1.0 (optionally, but recommended)
 
 ####[How to install](#install)
+####[Documentation](https://byaka.github.io/flaskJSONRPCServer-docs/)
 ####[About Gevent and async](#gevent-and-async)
 ####[About hot-reloading](#hot-reloading)
 ####[Simple example](#examples)
@@ -40,7 +41,7 @@ flaskJSONRPCServer resides on **github**. You can file issues or pull requests [
  - Lib collects self **speed-stats**
 
 ### Cons
- - No **documentation**, only examples in package (sorry, i not have time for now)
+ - Not fully **documentated**. For now only examples in package and [API documentation](https://byaka.github.io/flaskJSONRPCServer-docs/).
  - Lib not has **decorators**, so it not a "Flask-way" (this can be simply added, but i not use decorators, sorry)
 
 ### Install
