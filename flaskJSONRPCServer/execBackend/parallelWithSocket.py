@@ -70,7 +70,8 @@ class execBackend:
       if not server.setts.gevent:
          server._throw('ExecBackend "parallelWithSocket" not implemented for Flask backend yet')
       # warnings
-      if self.settings.useCPickle: server._logger('WARNING: cPickle is slow backend')
+      if self.settings.useCPickle:
+         server._logger(2, 'WARNING: cPickle is slow backend')
       # choise json-backend
       if self._jsonBackend is None: self._jsonBackend=server.jsonBackend
       # generate socket-file
@@ -94,7 +95,7 @@ class execBackend:
       """
       import multiprocessing
       for i in xrange(self.settings.poolSize): # multiprocessing.cpu_count()
-         p=multiprocessing.Process(target=self.childCicle, args=(server, ))
+         p=multiprocessing.Process(target=self.childCicle, args=(server, i))
          p.start()
          self._pool.append(p)
       # create api on unix-socket
@@ -200,11 +201,13 @@ class execBackend:
       else: # simple request
          return tFunc(self, data, async, cb)
 
-   def childCicle(self, parentServer):
+   def childCicle(self, parentServer, id=0):
       self._parentServer=parentServer
+      self._id='%s#child_%s'%(self._id, id)
       self._conn=None
       self._lazyRequest={}
       self._lazyRequestLatTime=None
+      self._serverOriginalMethods=magicDict({})
       self._server=flaskJSONRPCServer(['', ''], gevent=parentServer.setts.gevent, log=parentServer.setts.log, jsonBackend=self._jsonBackend, tweakDescriptors=None, experimental=parentServer.settings.experimental) #we need this dummy for some methods from it
       if not self.settings.allowThreads:
          # if threads not allowed, we don't need gevent in child
@@ -216,6 +219,7 @@ class execBackend:
       self.parentGlobalsMap={}
       if self.settings.importGlobalsFromParent:
          for k, v in self.parentGlobals.items():
+            if self._server._isFunction(v) or self._server._isModule(v): continue
             self.parentGlobalsMap[k]=self.var2hash(v, k)
       # overload some methods in parentServer
       self.childDisableNotImplemented()
@@ -224,6 +228,9 @@ class execBackend:
       parentServer.unlock=lambda dispatcher=None, exclusive=False: self.sendRequest('/parent', 'unlock', [(None if dispatcher is None else dispatcher._id), exclusive])
       parentServer.wait=self.childWait
       parentServer._speedStatsAdd=self.childSpeedStatsAdd
+      self._serverOriginalMethods._logger=self._server._logger
+      self._server._logger=self.childLogger
+      parentServer._logger=self.childLogger
       # main cicle
       while True:
          self.childSendLazyRequest()
@@ -236,6 +243,11 @@ class execBackend:
             continue
          if not self.settings.persistent_queueGet: # pause only need for non-persistent-mode
             parentServer._sleep(self.settings.sleepTime_emptyQueue)
+
+   def childLogger(self, level, *args):
+      level, args=self._server._loggerPrep(level, args)
+      args.insert(0, '   (%s)'%self._id)
+      self._serverOriginalMethods._logger(level, *args)
 
    def childSendLazyRequest(self):
       if self._lazyRequestLatTime is None: self._lazyRequestLatTime=self._server._getms()
@@ -251,7 +263,7 @@ class execBackend:
       self._lazyRequestLatTime=self._server._getms()
 
    def childCallDispatcher(self, p):
-      self._server._logger('Processing with backend "parallelWithSocket": %s()'%(p['dataIn']['method']))
+      self._server._logger(4, 'Processing with parallel-backend: %s()'%(p['dataIn']['method']))
       p['request']=magicDict(p['request']) # _callDispatcher() work with this like object, not dict
       status, params, result=self._parentServer._callDispatcher(p['uniqueId'], p['path'], p['dataIn'], p['request'], overload=self.childConnectionOverload, nativeThread=self.settings.allowThreads and not(self._parentServer.setts.gevent), isJSONP=p.get('isJSONP', False))
       if not self.settings.saveResult: return
@@ -283,6 +295,7 @@ class execBackend:
       # some overloads in _callDispatcher()._connection
       _connection['parallelType']='parallelWithSocket'
       _connection['parallelPoolSize']=self.settings.poolSize
+      _connection['parallelId']=self._id
       # wrap methods for passing "_connection" object
       _connection['call']['execute']=lambda code, scope=None, wait=True, cb=None: self.childEval(code, scope=scope, wait=wait, cb=cb, isExec=True, _connection=magicDict(_connection))
       _connection['call']['eval']=lambda code, scope=None, wait=True, cb=None: self.childEval(code, scope=scope, wait=wait, cb=cb, isExec=False, _connection=magicDict(_connection))
@@ -291,7 +304,7 @@ class execBackend:
 
    def childDisableNotImplemented(self):
       # disable none-implemented methods in parentServer
-      whiteList=['_callDispatcher', '_checkFileDescriptor', '_compressResponse', '_compressGZIP', '_uncompressGZIP', '_copyRequestContext', '_countFileDescriptor', '_fileGet', '_fileWrite', '_fixJSON', '_formatPath', '_getErrorInfo', '_getms', '_getScriptName', '_getScriptPath', '_getServerUrl', '_import', '_importAll', '_importSocket', '_importThreading', '_inChild', '_isArray', '_isDict', '_isFunction', '_isInstance', '_isNum', '_isString', '_logger', '_parseJSON', '_parseRequest', '_prepResponse', '_serializeJSON', '_sha1', '_sha256', '_strGet', '_throw', '_tweakLimit', 'fixJSON', '_sleep', '_thread', '_randomEx', '_controlGC', '_countMemory', '_calcMimeType']
+      whiteList=['_callDispatcher', '_checkFileDescriptor', '_compressResponse', '_compressGZIP', '_uncompressGZIP', '_copyRequestContext', '_countFileDescriptor', '_fileGet', '_fileWrite', '_fixJSON', '_formatPath', '_getErrorInfo', '_getms', '_getScriptName', '_getScriptPath', '_getServerUrl', '_import', '_importAll', '_importSocket', '_importThreading', '_inChild', '_isArray', '_isDict', '_isFunction', '_isInstance', '_isNum', '_isString', '_logger', '_loggerPrep', '_parseJSON', '_parseRequest', '_prepResponse', '_serializeJSON', '_sha1', '_sha256', '_strGet', '_throw', '_tweakLimit', 'fixJSON', '_sleep', '_thread', '_randomEx', '_controlGC', '_countMemory', '_calcMimeType']
       for name in dir(self._parentServer):
          if not self._parentServer._isFunction(getattr(self._parentServer, name)): continue
          if name not in whiteList:
@@ -312,7 +325,7 @@ class execBackend:
          # get from cache without checking
          for k in vars:
             res[k]=self.parentGlobals.get(k, None)
-            self._server._logger('CopyGlobal var "%s": without checking'%k)
+            self._server._logger(4, 'CopyGlobal var "%s": without checking'%k)
          if self._server._isFunction(cb):
             cb((res if self._server._isArray(var) else res.values()[0]), False, _connection)
       else:
@@ -327,13 +340,13 @@ class execBackend:
             for k, r in data['result'].items():
                if not r[0]: # not changed
                   res[k]=self.parentGlobals.get(k, None)
-                  self._server._logger('CopyGlobal var "%s": not changed'%k)
+                  self._server._logger(4, 'CopyGlobal var "%s": not changed'%k)
                elif r[1] is None: # not founded or not hashable
                   res[k]=None
                   if k in self.parentGlobals:
                      del self.parentGlobalsMap[k]
                      del self.parentGlobals[k]
-                  self._server._logger('CopyGlobal var "%s": not founded or not hashable'%k)
+                  self._server._logger(4, 'CopyGlobal var "%s": not founded or not hashable'%k)
                else: # changed
                   v=r[2]
                   # need to deseriolize value
@@ -341,7 +354,7 @@ class execBackend:
                   res[k]=v
                   self.parentGlobalsMap[k]=r[1]
                   self.parentGlobals[k]=v
-                  self._server._logger('CopyGlobal var "%s": changed'%k)
+                  self._server._logger(4, 'CopyGlobal var "%s": changed'%k)
             if self._server._isFunction(data['cb']):
                data['cb']((res if not data['onlyOne'] else res.values()[0]), False, _connection)
             else: data['result']=res
@@ -384,7 +397,7 @@ class execBackend:
          if returnSerialized: return h, s
          else: return h
       except Exception, e:
-         self._server._logger('Cant hash variable "%s": %s'%(name, e))
+         self._server._logger(1, 'ERROR: Cant hash variable "%s#%s": %s'%(name, type(var), e))
          if returnSerialized: return None, None
          else: return None
 
@@ -526,4 +539,3 @@ class execBackend:
          '%s_api'%self._id:self._server.stats(inMS=inMS)
       }
       return r
-
