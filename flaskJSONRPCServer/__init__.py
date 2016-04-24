@@ -1600,6 +1600,7 @@ class flaskJSONRPCServer:
       self._registerServerUrl(dict([[s, self._requestHandler] for s in self.pathsDef]))
       if self.settings.allowCompress: self._logger(2, 'WARNING: included compression is slow')
       if self.setts.gevent:
+         # serving with gevent's pywsgi
          if self.setts.blocking: self._logger(2, 'WARNING: blocking mode not implemented for gevent')
          try: import gevent
          except ImportError: self._throw('gevent backend not found')
@@ -1640,7 +1641,7 @@ class flaskJSONRPCServer:
                #       return func(*args, **kw)
                #    return bar
                # ssl.wrap_socket=sslwrap(ssl.wrap_socket)
-               server=WSGIServer(bindAdress, wsgi, log=logType, spawn=pool, keyfile=self.setts.ssl[0], certfile=self.setts.ssl[1], ssl_version=ssl.PROTOCOL_TLSv1_2) #ssl.PROTOCOL_SSLv23
+               server=WSGIServer(bindAdress, wsgiWrapped, log=logType, spawn=pool, keyfile=self.setts.ssl[0], certfile=self.setts.ssl[1], ssl_version=ssl.PROTOCOL_TLSv1_2) #ssl.PROTOCOL_SSLv23
             else:
                server=WSGIServer(bindAdress, wsgiWrapped, log=logType, spawn=pool)
             self._server.append(server)
@@ -1648,8 +1649,9 @@ class flaskJSONRPCServer:
             if joinLoop and i+1==len(self.setts.ip): server.serve_forever()
             else: server.start()
       else:
-         if self.setts.socket:
-            self._throw('Serving on *unix-domain-socket not supported without gevent')
+         # serving with werkzeug
+         if any(self.setts.socket):
+            self._throw('Serving on raw-socket not supported without gevent')
          self._logger(4, 'SERVER RUNNING..')
          if not self.setts.debug:
             import logging
@@ -1661,8 +1663,23 @@ class flaskJSONRPCServer:
             sslContext=ssl.SSLContext(ssl.PROTOCOL_TLSv1_2) #SSL.Context(SSL.SSLv23_METHOD)
             sslContext.load_cert_chain(self.setts.ssl[1], self.setts.ssl[0])
          self._registerServerUrl({'/_werkzeugStop/':self._werkzeugStop}, methods=['GET'])
-         self._server=self._thread(self.flaskApp.run, kwargs={'host':self.setts.ip, 'port':self.setts.port, 'ssl_context':sslContext, 'debug':self.setts.debug, 'threaded':not(self.setts.blocking)})
-         if joinLoop: self._server.join()
+         self._server=[]
+         wsgi=self.getWSGI()
+         from werkzeug.serving import run_simple as werkzeug_run
+         for i in xrange(len(self.setts.ip)):
+            # wrapping WSGI for detecting adress
+            if self.setts.socket[i]:
+               __flaskJSONRPCServer_binded=(True, self.setts.socketPath[i], self.setts.socket[i])
+            else:
+               __flaskJSONRPCServer_binded=(False, self.setts.ip[i], self.setts.port[i])
+            def wsgiWrapped(environ, start_response, __flaskJSONRPCServer_binded=__flaskJSONRPCServer_binded, __wsgi=wsgi):
+               environ['__flaskJSONRPCServer_binded']=__flaskJSONRPCServer_binded
+               return __wsgi(environ, start_response)
+            # init and start wsgi backend
+            server=self._thread(werkzeug_run, args=[self.setts.ip[i], self.setts.port[i], wsgiWrapped], kwargs={'ssl_context':sslContext, 'use_debugger':self.setts.debug, 'threaded':not(self.setts.blocking), 'use_reloader':False})
+            # server=self._thread(self.flaskApp.run, kwargs={'host':self.setts.ip[i], 'port':self.setts.port[i], 'ssl_context':sslContext, 'debug':self.setts.debug, 'threaded':not(self.setts.blocking)})
+            self._server.append(server)
+            if joinLoop and i+1==len(self.setts.ip): server.join()
 
    def _werkzeugStop(self):
       """
@@ -1716,7 +1733,7 @@ class flaskJSONRPCServer:
 
    def stop(self, timeout=20, processingDispatcherCountMax=0):
       """
-      This method stop all execute backends of server, then stop serving backend (werkzeug or pywsgi for now).
+      This method stop all execute backends of server, then stop serving backend (werkzeug or gevent.pywsgi for now).
       For more info see <server>._waitProcessingDispatchers().
 
       :param int timeout:
@@ -1728,25 +1745,27 @@ class flaskJSONRPCServer:
       self._waitProcessingDispatchers(timeout=timeout, processingDispatcherCountMax=processingDispatcherCountMax)
       # stop execBackends
       self._stopExecBackends(timeout=timeout-(self._getms()-mytime)/1000.0, processingDispatcherCountMax=processingDispatcherCountMax)
+      withError=[]
       # stop server's backend
       if self.setts.gevent:
-         withError=[]
          for s in self._server:
             try: s.stop(timeout=timeout-(self._getms()-mytime)/1000.0)
             except Exception, e: withError.append(e)
-         if withError:
-            self._deepUnlock()
-            self._throw('\n'.join(withError))
       else:
-         self._werkzeugStopToken=str(int(random.random()*999999))
-         #! all other methods (test_client() and test_request_context()) not "return werkzeug.server.shutdown" in request.environ
-         try:
-            r=urllib2.urlopen('http://%s:%s/_werkzeugStop/?token=%s'%(self.setts.ip, self.setts.port, self._werkzeugStopToken)).read()
-         except Exception, e: r=''
-         if r:
-            self._deepUnlock()
-            self._throw(r)
+         for i in xrange(len(self._server)):
+            self._werkzeugStopToken=self._randomEx(999999)
+            #! all other methods, like "test_client()" and "test_request_context()", not has "return werkzeug.server.shutdown" in request.environ
+            try:
+               r=urllib2.urlopen('http://%s:%s/_werkzeugStop/?token=%s'%(self.setts.ip[i], self.setts.port[i], self._werkzeugStopToken)).read()
+               if r: withError.append(r)
+            except Exception, e: pass # error is normal in this case
+      # check is errors happened
+      if withError:
+         self._deepUnlock()
+         self._throw('\n'.join(withError))
       self._logger(3, 'SERVER STOPPED')
+      if not self.setts.gevent:
+         self._logger(0, 'INFO: Ignore all errors about "Unhandled exception in thread started by ..."\n')
       self.processingRequestCount=0
       self._deepUnlock()
 
