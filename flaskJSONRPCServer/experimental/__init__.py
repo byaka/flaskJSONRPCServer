@@ -19,7 +19,7 @@ if __name__=='__main__':
    from utils import magicDict
 else:
    # from flaskJSONRPCServer.utils import magicDict
-   from ..__init__ import magicDict
+   from ..utils import magicDict
 
 import sys, string, time, re, codecs
 from collections import deque
@@ -368,7 +368,8 @@ def _patchServer(server):
       server._asyncJSON_backup=server.jsonBackend
       def tFunc_dumps(data, server=server, **kwargs):
          size=sys.getsizeof(data)
-         if size is not None and size<1*1024*1024: return server._asyncJSON_backup.dumps(data)
+         if size is not None and size<1*1024*1024:
+            return server._asyncJSON_backup.dumps(data)
          # print '>>>>>>ASYNCJSON dumps start, size %smb'%(round(size/1024.0/1024.0, 2))
          mytime=server._getms()
          res=asyncJSON_dumps(data, maxProcessTime=0.1, cb=lambda *args:server._sleep(0.001))
@@ -377,7 +378,8 @@ def _patchServer(server):
          return res
       def tFunc_loads(data, server=server, **kwargs):
          size=sys.getsizeof(data)
-         if size is not None and size<10*1024*1024: return server._asyncJSON_backup.loads(data)
+         if size is not None and size<10*1024*1024:
+            return server._asyncJSON_backup.loads(data)
          # print '>>>>>>ASYNCJSON loads start, size %smb'%(round(size/1024.0/1024.0, 2))
          mytime=server._getms()
          res=asyncJSON_loads(data, maxProcessTime=0.1, cb=lambda:server._sleep(0.001))
