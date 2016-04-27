@@ -3,6 +3,7 @@
 
 import httplib
 from virtVar import virtVar
+import gmultiprocessing
 
 class UnixHTTPConnection(httplib.HTTPConnection):
    """

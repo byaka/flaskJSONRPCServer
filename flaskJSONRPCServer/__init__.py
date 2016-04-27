@@ -34,7 +34,8 @@ Flask=None
 request=None
 Response=None
 
-from utils import UnixHTTPConnection, magicDict, virtVar
+# from utils import UnixHTTPConnection, magicDict, virtVar
+from utils import magicDict, virtVar
 
 import execBackend as execBackendCollection
 
@@ -68,13 +69,14 @@ class flaskJSONRPCServer:
    :param str magicVarForDispatcher: Name for variable, that can be passed to every dispatcher and will contain many useful data and methods. For more info see <server>.aboutMagicVarForDispatcher.
    """
 
-   def __init__(self, bindAdress, multipleAdress=False, blocking=False, cors=False, gevent=False, debug=False, log=3, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=2*1024*1024, jsonBackend='simplejson', notifBackend='simple', dispatcherBackend='simple', auth=None, experimental=False, controlGC=True, magicVarForDispatcher='_connection'):
+   def __init__(self, bindAdress, multipleAdress=False, blocking=False, cors=False, gevent=False, debug=False, log=3, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=2*1024*1024, jsonBackend='simplejson', notifBackend='simple', dispatcherBackend='simple', auth=None, experimental=False, controlGC=True, magicVarForDispatcher='_connection', name=None):
       self.consoleColor=magicDict({'header':'\033[95m', 'okblue':'\033[94m', 'okgreen':'\033[92m', 'warning':'\033[93m', 'fail':'\033[91m', 'end':'\033[0m', 'bold':'\033[1m', 'underline':'\033[4m'})
       # Flask imported here for avoiding error in setup.py if Flask not installed yet
       global Flask, request, Response
       from flask import Flask, request, Response
       self._tweakLimit(tweakDescriptors)
-      self.flaskAppName='_flaskJSONRPCServer:%s_'%(int(random.random()*99999))
+      self.name=name or self._randomEx(9999999, pref='flaskJSONRPCServer<', suf='>')
+      self.flaskAppName=self.name
       self.version=__version__
       self.settings=magicDict({
          'multipleAdress':multipleAdress,
@@ -109,7 +111,7 @@ class flaskJSONRPCServer:
       bindAdress=bindAdress if multipleAdress else [bindAdress]
       for bind in bindAdress:
          if len(bind)!=2: self._throw('Wrong "bindAdress" parametr', bind)
-         isSocket=str(type(bind[1])) in ["<class 'socket._socketobject'>", "<class 'gevent.socket.socket'>"]
+         isSocket=str(type(bind[1])) in ["<class 'socket._socketobject'>", "<class 'gevent.socket.socket'>", "<class 'gevent._socket2.socket'>"]
          tArr={
             'ip':bind[0] if not isSocket else None,
             'port':bind[1] if not isSocket else None,
@@ -173,7 +175,8 @@ class flaskJSONRPCServer:
       :param bool notif: flag indicating is this backend a notification backend.
       :return: unique identification.
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       # check if execBackend._id passed. If true, not needed to initialize it
       if execBackend in self.execBackend: return execBackend
       # get _id of backend and prepare
@@ -212,7 +215,8 @@ class flaskJSONRPCServer:
       :param dict urlMap: Map of urls and functions(handlers).
       :return:
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       if methods is None: methods=['GET', 'OPTIONS', 'POST']
       urlNow=self._getServerUrl()
       for s, h in urlMap.items():
@@ -223,19 +227,31 @@ class flaskJSONRPCServer:
       """
       This methodReplace existed imported module and monke_putch if needed.
       """
-      #! maybe it can be useful gevent.socket.__implements__
       #! Add checking with "monkey.is_module_patched()"
-      for k, v in modules.items(): #delete existed
+      #delete existed
+      for k, v in modules.items():
          if k in globals(): del globals()[k]
          if scope is not None and k in scope: del scope[k]
          if forceDelete and k in sys.modules: del sys.modules[k] # this allow unpatch monkey_patched libs
-      if self.setts.gevent: #patching
+      # apply patchs
+      if self.setts.gevent:
          from gevent import monkey
          for k, v in modules.items():
             if not v: continue
             v=v if self._isArray(v) else [v]
-            if hasattr(monkey, v[0]): getattr(monkey, v[0])(**(v[1] if len(v)>1 else {}))
-      for k, v in modules.items(): #add to scope
+            patchName=v[0]
+            if not hasattr(monkey, patchName):
+               self._logger(2, 'Warning: unknown patch "%s"'%patchName)
+               continue
+            patch=getattr(monkey, patchName)
+            patchSupported, _, _, _=inspect.getargspec(patch)
+            patchArgs_default=v[1] if len(v)>1 else {}
+            patchArgs={}
+            for k, v in patchArgs_default.items():
+               if k in patchSupported: patchArgs[k]=v
+            patch(**patchArgs)
+      #add to scope
+      for k, v in modules.items():
          m=__import__(k)
          globals()[k]=m
          if scope is not None: scope[k]=m
@@ -251,7 +267,7 @@ class flaskJSONRPCServer:
       """
       modules={
          'threading':None,
-         'thread':['patch_thread', {'threading':True}], #'_threading_local':True, 'Event':False', logging':True, 'existing_locks':True
+         'thread':['patch_thread', {'threading':True, '_threading_local':True, 'Event':False, 'logging':True, 'existing_locks':False}],
          'time':'patch_time'
       }
       return self._import(modules, scope=scope, forceDelete=forceDelete)
@@ -265,6 +281,8 @@ class flaskJSONRPCServer:
       :return: scope
       """
       modules={
+         'httplib':None,
+         'urllib2':None,
          'socket':['patch_socket', {'dns':True, 'aggressive':True}],
          'ssl':'patch_ssl'
       }
@@ -391,7 +409,6 @@ class flaskJSONRPCServer:
    def _isInstance(self, o): return isinstance(o, (InstanceType))
 
    def _isModule(self, o): return isinstance(o, (ModuleType))
-
 
    def _isArray(self, o): return isinstance(o, (list))
 
@@ -618,7 +635,7 @@ class flaskJSONRPCServer:
       Source based on http://stackoverflow.com/a/9493520/5360266
       """
       if self._inChild():
-         self._throw('This method can be called only from <main> process')
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       if self._parentModule is None:
          self._throw("Parent module not founded")
       if typeOf is None:
@@ -643,8 +660,6 @@ class flaskJSONRPCServer:
       :param str name:
       :param float val: time in milliseconds, that will be writed to stats.
       """
-      if self._inChild():
-         self._throw('This method can be called only from <main> process')
       names=name if self._isArray(name) else [name]
       vals=val if self._isArray(val) else [val]
       if len(names)!=len(vals):
@@ -670,7 +685,8 @@ class flaskJSONRPCServer:
       :param str|obj dispatcherBackend: Set specific backend for this dispatchers.
       :param str|obj notifBackend: Set specific backend for this dispatchers.
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       if not self._isInstance(dispatcher): self._throw('Bad dispatcher type: %s'%type(dispatcher))
       fallback=self.setts.fallback_JSONP if fallback is None else fallback
       path=self._formatPath(path)
@@ -705,7 +721,8 @@ class flaskJSONRPCServer:
       :param str|obj dispatcherBackend: Set specific backend for this dispatcher.
       :param str|obj notifBackend: Set specific backend for this dispatchers.
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       if not self._isFunction(dispatcher): self._throw('Bad dispatcher type: %s'%type(dispatcher))
       fallback=self.setts.fallback_JSONP if fallback is None else fallback
       name=name or dispatcher.__name__
@@ -766,7 +783,11 @@ class flaskJSONRPCServer:
          tArr2=[]
          tArr1=tArr1 if self._isArray(tArr1) else [tArr1] #support for batch requests
          for r in tArr1:
-            tArr2.append({'jsonrpc':r.get('jsonrpc', None), 'method':r.get('method', None), 'params':r.get('params', None), 'id':r.get('id', None)})
+            correctId=None
+            if 'id' in r:
+               # if in request exists key "id" but it's "null", we process him like correct request, not notify-request
+               correctId=0 if r['id'] is None else r['id']
+            tArr2.append({'jsonrpc':r.get('jsonrpc', None), 'method':r.get('method', None), 'params':r.get('params', None), 'id':correctId})
          self._speedStatsAdd('parseRequest', self._getms()-mytime)
          return True, tArr2
       except Exception, e:
@@ -833,7 +854,6 @@ class flaskJSONRPCServer:
       :param bool inMS: If True, all speed-stats will be in milliseconds, else in seconds.
       :return dict: Collected perfomance stats
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
       res={'connPerSec_now':round(self.connPerMinute.count/60.0, 2), 'connPerSec_old':round(self.connPerMinute.oldCount/60.0, 2), 'connPerSec_max':round(self.connPerMinute.maxCount/60.0, 2), 'speedStats':{}, 'processingRequestCount':self.processingRequestCount, 'processingDispatcherCount':self.processingDispatcherCount}
       #calculate speed stats
       for k, v in self.speedStats.items():
@@ -865,7 +885,7 @@ class flaskJSONRPCServer:
 
    def _logger(self, level, *args):
       """
-      This method is wrapper for logger.
+      This method is wrapper for logger. First parametr <level> is optional, if it not setted, message is interpreted as "critical" and will be shown also if logging disabled.
 
       :param int level: Info-level of message. 0 is critical (and visible always), 1 is error, 2 is warning, 3 is info, 4 is debug. If is not number, it passed as first part of message.
       """
@@ -895,7 +915,8 @@ class flaskJSONRPCServer:
 
       :param func dispatcher:
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       if dispatcher is None: self.locked=True #global lock
       else: #local lock
          if self._isFunction(dispatcher):
@@ -910,7 +931,8 @@ class flaskJSONRPCServer:
       :param func dispatcher:
       :param bool exclusive:
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       #exclusive=True unlock dispatcher also if global lock=True
       if dispatcher is None: self.locked=False #global lock
       else: #local lock
@@ -928,7 +950,8 @@ class flaskJSONRPCServer:
       :param func sleepMethod:
       :param bool returnStatus:
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       mytime=self._getms()
       sleepMethod=sleepMethod or self._sleep
       if dispatcher is None: #global lock
@@ -954,21 +977,24 @@ class flaskJSONRPCServer:
       """
       This method locks the server completely, the server doesn't process requests.
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       self.deepLocked=True
 
    def _deepUnlock(self):
       """
       This method unlocks the server completely.
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       self.deepLocked=False
 
    def _deepWait(self):
       """
       This method waits while server be locked.
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       while self.deepLocked:
          self._sleep(self.setts.sleepTime_waitDeepLock)
 
@@ -982,7 +1008,8 @@ class flaskJSONRPCServer:
       :param int processingDispatcherCountMax:
       :param bool safely:
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       self._deepLock()
       mytime=self._getms()
       self._waitProcessingDispatchers(timeout=timeout, processingDispatcherCountMax=processingDispatcherCountMax)
@@ -1033,7 +1060,8 @@ class flaskJSONRPCServer:
       :param int processingDispatcherCountMax:
       :param bool safely:
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       api2=api if self._isArray(api) else [api]
       mArr={}
       api=[]
@@ -1129,7 +1157,7 @@ class flaskJSONRPCServer:
       :param bool allowCompress: Is compressing allowed for this request. You can change it for forcing compression.
       :param instance server: Link to server's instance.
       :param set(isRawSocket,ip|socketPath,port|socket) servedBy: Info about server's adress. Usefull if you use multiple adresses for one server.
-      :param dict('lock','unlock','wait','sleep',..) call: Some useful server's methods, you can call them.
+      :param dict('lock','unlock','wait','sleep','log',..) call: Some useful server's methods, you can call them.
       :param bool nativeThread: Is this request and dispatcher executed in native python thread.
       :param bool notify: Is this request is Notify-request.
       :param func dispatcher: Link to dispatcher.
@@ -1182,9 +1210,10 @@ class flaskJSONRPCServer:
                   'unlock':lambda exclusive=False: self.unlock(dispatcher=dispatcher, exclusive=exclusive),
                   'wait':lambda returnStatus=False: self.wait(dispatcher=dispatcher, sleepMethod=_sleep, returnStatus=returnStatus),
                   'sleep':_sleep,
+                  'log':self._logger
                }),
                'nativeThread':nativeThread if nativeThread is not None else not(self.setts.gevent),
-               'notify':not('id' in data),
+               'notify':data['id'] is None,
                'dispatcher':dispatcher,
                'path':path,
                'dispatcherName':data['method']
@@ -1296,7 +1325,8 @@ class flaskJSONRPCServer:
       :param Request() request:
       :return dict:
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       # prepare for pickle
       #! #57 It must be on TYPE-based, not NAME-based
       convWhitelist=['REQUEST_METHOD', 'PATH_INFO', 'SERVER_PROTOCOL', 'QUERY_STRING', 'REMOTE_ADDR', 'CONTENT_LENGTH', 'HTTP_USER_AGENT', 'SERVER_NAME', 'REMOTE_PORT', 'wsgi.url_scheme', 'SERVER_PORT', 'HTTP_HOST', 'CONTENT_TYPE', 'HTTP_ACCEPT_ENCODING', 'GATEWAY_INTERFACE']
@@ -1332,7 +1362,8 @@ class flaskJSONRPCServer:
       :param str method:
       :return Response():
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       self.processingRequestCount+=1
       self._gcStats.processedRequestCount+=1
       try:
@@ -1354,7 +1385,8 @@ class flaskJSONRPCServer:
       :param str method:
       :return Response():
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       # DeepLock
       self._deepWait()
       # calculate connections per second
@@ -1429,7 +1461,7 @@ class flaskJSONRPCServer:
                   requestCopy=self._copyRequestContext(request)
                   requestCopy['servedBy']=servedBy
                   # select backend for executing
-                  if not dataIn['id']: #notification request
+                  if dataIn['id'] is None: #notification request
                      execBackend=self.execBackend.get(dispatcher.notifBackendId, None)
                      if hasattr(execBackend, 'add'):
                         status, m=execBackend.add(uniqueId, path, dataIn, requestCopy)
@@ -1554,7 +1586,8 @@ class flaskJSONRPCServer:
       :param bool restart:
       :param int sleep:
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       if not restartOn and not self.settings.controlGC: self.start(joinLoop=True)
       else:
          if restartOn:
@@ -1575,7 +1608,8 @@ class flaskJSONRPCServer:
       """
       This merhod run all execute backends of server.
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       # start execBackends
       for _id, bck in self.execBackend.items():
          if hasattr(bck, 'start'): bck.start(self)
@@ -1593,7 +1627,8 @@ class flaskJSONRPCServer:
 
       :param bool joinLoop:
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       # start execBackends
       self._startExecBackends()
       # reset flask routing (it useful when somebody change self.flaskApp)
@@ -1602,16 +1637,18 @@ class flaskJSONRPCServer:
       if self.setts.gevent:
          # serving with gevent's pywsgi
          if self.setts.blocking: self._logger(2, 'WARNING: blocking mode not implemented for gevent')
-         try: import gevent
+         try: from gevent import monkey
          except ImportError: self._throw('gevent backend not found')
          self._logger(3, 'SERVER RUNNING AS GEVENT..')
-         from gevent import monkey
+         # check what patches supports installed gevent version
          monkeyPatchSupported, _, _, _=inspect.getargspec(monkey.patch_all)
-         if 'sys' in monkeyPatchSupported:
-            monkey.patch_all(sys=False, os=False, thread=False, time=False, ssl=False, socket=False) #! "os" may cause some problems with multiprocessing. but better get original objects in execBackend
-         else: # for old version of gevent
-            monkey.patch_all(os=False, thread=False, time=False, ssl=False, socket=False, dns=False)
-         self._importAll()
+         monkeyPatchArgs_default={'socket':False, 'dns':False, 'time':False, 'select':True, 'thread':False, 'os':True, 'ssl':False, 'httplib':False, 'subprocess':True, 'sys':False, 'aggressive':True, 'Event':False, 'builtins':True, 'signal':True}
+         monkeyPatchArgs={}
+         for k, v in monkeyPatchArgs_default.items():
+            if k in monkeyPatchSupported: monkeyPatchArgs[k]=v
+         # monkey patching
+         monkey.patch_all(**monkeyPatchArgs)
+         self._importAll(forceDelete=True, scope=globals())
          from gevent.pywsgi import WSGIServer
          from gevent.pool import Pool
          if self.setts.ssl: from gevent import ssl
@@ -1621,8 +1658,8 @@ class flaskJSONRPCServer:
          for i in xrange(len(self.setts.ip)):
             pool=Pool(None)
             self._serverPool.append(pool)
-            bindAdress=(self.setts.ip[i], self.setts.port[i]) if not self.setts.socket[i] else self.setts.socket[i]
-            logType=('default' if self.setts.debug else False)
+            bindAdress=self.setts.socket[i] if self.setts.socket[i] else (self.setts.ip[i], self.setts.port[i])
+            logType=('default' if self.setts.debug else None)
             # wrapping WSGI for detecting adress
             if self.setts.socket[i]:
                __flaskJSONRPCServer_binded=(True, self.setts.socketPath[i], self.setts.socket[i])
@@ -1688,7 +1725,8 @@ class flaskJSONRPCServer:
 
       :return str|None: Error message if some problems happened.
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       try:
          token1=request.args.get('token', '')
          token2=self._werkzeugStopToken
@@ -1708,7 +1746,8 @@ class flaskJSONRPCServer:
       :param int timeout:
       :param int processingDispatcherCountMax:
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       mytime=self._getms()
       for _id, bck in self.execBackend.items():
          if hasattr(bck, 'stop'):
@@ -1722,7 +1761,8 @@ class flaskJSONRPCServer:
       :param int timeout:
       :param int processingDispatcherCountMax:
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       mytime=self._getms()
       if processingDispatcherCountMax is not False:
          while self.processingDispatcherCount>processingDispatcherCountMax:
@@ -1739,7 +1779,8 @@ class flaskJSONRPCServer:
       :param int timeout:
       :param int processingDispatcherCountMax:
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       self._deepLock()
       mytime=self._getms()
       self._waitProcessingDispatchers(timeout=timeout, processingDispatcherCountMax=processingDispatcherCountMax)
@@ -1780,7 +1821,8 @@ class flaskJSONRPCServer:
       :param int werkzeugTimeout:
       :param bool joinLoop:
       """
-      if self._inChild(): self._throw('This method can be called only from <main> process')
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       self.stop(timeout=timeout, processingDispatcherCountMax=processingDispatcherCountMax)
       if not self.setts.gevent: #! Without this werkzeug throw "adress already in use"
          self._sleep(werkzeugTimeout)

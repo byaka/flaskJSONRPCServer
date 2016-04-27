@@ -8,10 +8,11 @@ This module contains dispatcher-execution backend for flaskJSONRPCServer.
 if __name__=='__main__':
    import sys, os
    sys.path.append(os.path.dirname(os.path.realpath(sys.argv[0]))+'/..')
-   from utils import magicDict
+   from utils import magicDict, UnixHTTPConnection
 else:
-   # from flaskJSONRPCServer.utils import magicDict
-   from ..__init__ import * #! нужен более конкретный импорт чтобы не засорять область видимости
+   import sys, os
+   from ..__init__ import flaskJSONRPCServer, experimentalPack
+   from ..utils import magicDict, UnixHTTPConnection, virtVar
 
 class execBackend:
    """
@@ -31,7 +32,7 @@ class execBackend:
    :param bool useCPickle:
    """
 
-   def __init__(self, poolSize=1, importGlobalsFromParent=True, parentGlobals=None, sleepTime_resultCheck=0.1, sleepTime_emptyQueue=0.1, sleepTime_waitLock=0.75, sleepTime_lazyRequest=2*60*1000, sleepTime_checkPoolStopping=0.3, allowThreads=True, id='execBackend_parallelWithSocket', socketPath=None, saveResult=True, persistent_queueGet=True, useCPickle=False):
+   def __init__(self, poolSize=1, importGlobalsFromParent=True, parentGlobals=None, sleepTime_resultCheck=0.1, sleepTime_emptyQueue=0.1, sleepTime_waitLock=0.75, sleepTime_lazyRequest=2*60*1000, sleepTime_checkPoolStopping=0.3, allowThreads=True, id='execBackend_parallelWithSocket', socketPath=None, saveResult=True, persistent_queueGet=True, useCPickle=False, disableGeventInChild=False):
       self.settings=magicDict({
          'poolSize':poolSize,
          'sleepTime_resultCheck':sleepTime_resultCheck,
@@ -44,7 +45,8 @@ class execBackend:
          'lazyRequestChunk':1000,
          'saveResult':saveResult,
          'persistent_queueGet':persistent_queueGet,
-         'useCPickle':useCPickle
+         'useCPickle':useCPickle,
+         'disableGeventInChild':disableGeventInChild
       })
       from collections import deque
       self.parentGlobals=parentGlobals or {}
@@ -79,13 +81,6 @@ class execBackend:
       # import parent's globals if needed
       if self.settings.importGlobalsFromParent:
          server._importGlobalsFromParent(scope=self.parentGlobals)
-      """
-      я не помню, по какой причине мне пришлось перенести патчинг до запуска дочерних процессов. нужно еще раз проверить что будет, если патчить после запуска дочерних процессов и подробно описать здесь результаты
-      """
-      # patching
-      from gevent import monkey
-      monkey.patch_all(sys=False, os=False, thread=False, time=False, ssl=False, socket=False) #! "os" may cause some problems with multiprocessing. but better get original objects in execBackend
-      server._importAll(forceDelete=True)
       # start processesPool
       listeners=[]
       """
@@ -93,28 +88,34 @@ class execBackend:
       But if this code go before "self._server.start()", all work fine.
       I not understand why this happened and i spend more then two days for debugging.
       """
-      import multiprocessing
-      import socket
+      from ..utils import gmultiprocessing
       for i in xrange(self.settings.poolSize): # multiprocessing.cpu_count()
-         # generate socket-file
+         # generate socket-file for API
          self.socketPath='%s/.%s.%s#child_%s.sock'%(server._getScriptPath(), server._getScriptName(withExt=False), self._id, i)
          if os.path.exists(self.socketPath): os.remove(self.socketPath)
-         # create listener
-         l=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-         l.bind(self.socketPath)
-         l.listen(1)
-         listeners.append((self.socketPath, l))
+         listeners.append(self.socketPath)
          # run child process
-         p=multiprocessing.Process(target=self.childCicle, args=(server, i))
+         # p=gipc.start_process(target=self.childCicle, args=(server, i))
+         #! нужно попытаться избавиться от необходимости передавать в дочерний процесс инстанс сервера
+         p=gmultiprocessing.Process(target=self.childCicle, args=(server, i))
          p.start()
          self._pool.append(p)
+      # create socket for API
+      from gevent import socket
+      for i, lPath in enumerate(listeners):
+         # create listener
+         l=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+         l.bind(lPath)
+         l.listen(1)
+         listeners[i]=(lPath, l)
+      # link to parentServer
       self._parentServer=server
       #select compression settings
       allowCompress=False
       compressMinSize=100*1024*1024
       if server.settings.experimental and experimentalPack.use_moreAsync and '_compressGZIP' in experimentalPack.moreAsync_methods: allowCompress=True
       #start API on unix-socket
-      self._server=flaskJSONRPCServer(listeners, multipleAdress=True, blocking=False, cors=False, gevent=server.setts.gevent, debug=False, log=server.settings.log, fallback=False, allowCompress=allowCompress, compressMinSize=compressMinSize, jsonBackend=self._jsonBackend, tweakDescriptors=None, notifBackend='simple', dispatcherBackend='simple', experimental=server.settings.experimental, controlGC=False)
+      self._server=flaskJSONRPCServer(listeners, multipleAdress=True, blocking=False, cors=False, gevent=server.setts.gevent, debug=False, log=server.settings.log, fallback=False, allowCompress=allowCompress, compressMinSize=compressMinSize, jsonBackend=self._jsonBackend, tweakDescriptors=None, notifBackend='simple', dispatcherBackend='simple', experimental=server.settings.experimental, controlGC=False, name='API_of_execBackend<%s>'%self._id)
       self._server.setts.antifreeze_batchMaxTime=1*1000
       self._server.setts.antifreeze_batchBreak=False
       self._server.setts.antifreeze_batchSleep=1
@@ -158,7 +159,8 @@ class execBackend:
          return None, str(e)
 
    def check(self, uniqueId):
-      if not self.settings.saveResult: return None, None, '<saveResult> is False'
+      if not self.settings.saveResult: #! maybe this case must be error
+         return None, None, '<saveResult> is False'
       mytime=self._parentServer._getms()
       while uniqueId not in self.result:
          self._parentServer._sleep(self.settings.sleepTime_resultCheck)
@@ -182,20 +184,25 @@ class execBackend:
       else:
          data={'jsonrpc': '2.0', 'method': method, 'params':params}
          if not notif: #like notif
-            data['id']=int(random.random()*999999)
-      try: data=self._parentServer._serializeJSON(data)
+            data['id']=self._server._randomEx(9999999)
+      try: data=self._server._serializeJSON(data)
       except Exception, e:
-         self._parentServer._throw('Cant serialize JSON: %s'%(e))
-      _conn=self._conn if self._conn is not None else UnixHTTPConnection(self.socketPath)
+         self._server._throw('Cant serialize JSON: %s'%(e))
+      if self._server.settings.gevent:
+         from gevent import socket as sockClass
+      else:
+         import socket as sockClass
+      _conn=self._conn if self._conn is not None else UnixHTTPConnection(self.socketPath, socketClass=sockClass)
       for i in xrange(10):
          try:
             _conn.request('POST', path, data, {'Token':self.token, 'Accept-encoding':'gzip'})
             if self._conn is not None: self._conn=_conn
             break
-         except Exception: pass
-         self._parentServer._sleep(1)
-         _conn=UnixHTTPConnection(self.socketPath)
-      else: self._parentServer._throw('Cant connect to backend-API:'%self.socketPath)
+         except Exception, e:
+            print '!!', e
+            self._server._sleep(1)
+         _conn=UnixHTTPConnection(self.socketPath, socketClass=sockClass)
+      else: self._server._throw('Cant connect to backend-API:'%self.socketPath)
       resp=_conn.getresponse()
       data2=resp.read()
       if notif or self._server._isArray(method):
@@ -203,13 +210,16 @@ class execBackend:
             self._parentServer._speedStatsAdd(method, self._server._getms()-mytime)
          return
       if resp.getheader('Content-Encoding', None)=='gzip':
-         data2=self._parentServer._uncompressGZIP(data2)
-      data2=self._parentServer._parseJSON(data2)
+         data2=self._server._uncompressGZIP(data2)
+      try: data2=self._server._parseJSON(data2)
+      except Exception, e:
+         print data2
+         self._server._throw('Cant parse JSON: %s'%(e))
       if method!='speedStatsAdd':
          self._parentServer._speedStatsAdd(method, self._server._getms()-mytime)
       if not self._server._isDict(data2): return None
       elif data2.get('error', None):
-         self._parentServer._throw('Error %s: %s'%(data2['error']['code'], data2['error']['message']))
+         self._server._throw('Error %s: %s'%(data2['error']['code'], data2['error']['message']))
       return data2.get('result', None)
 
    def sendRequestEx(self, data, async=False, cb=None, returnAllData=False):
@@ -222,46 +232,55 @@ class execBackend:
             data['result']=None
             data['error']=e
          if self._server._isFunction(cb): cb(data, self)
-         elif data['error']: self._parentServer._throw(data['error'])
+         elif data['error']: self._server._throw(data['error'])
          return (data if returnAllData else data['result'])
       # process request
       if async and self._server._isFunction(cb): #fully async with callback
-         if not self.settings.allowThreads:
-            self._parentServer._logger('Fully async request only supported, if allowThreads==True')
-         self._parentServer._thread(tFunc, args=[self, data, False, cb])
+         # if not self.settings.allowThreads:
+         #    self._server._logger(1, 'Fully async request only supported, if allowThreads==True')
+         self._server._thread(tFunc, args=[self, data, False, cb])
       else: # simple request
          return tFunc(self, data, async, cb)
 
    def childCicle(self, parentServer, id=0):
+      self._pool=None
       self._parentServer=parentServer
       self._id='%s#child_%s'%(self._id, id)
-      self._conn=None
       self._lazyRequest={}
-      self._lazyRequestLatTime=None
+      self._lazyRequestLastTime=None
       self._serverOriginalMethods=magicDict({})
-      self._server=flaskJSONRPCServer(['', ''], gevent=parentServer.setts.gevent, log=parentServer.setts.log, jsonBackend=self._jsonBackend, tweakDescriptors=None, experimental=parentServer.settings.experimental, controlGC=parentServer.settings.controlGC) #we need this dummy for some methods from it
-      if not self.settings.allowThreads:
-         # if threads not allowed, we don't need gevent in child
-         parentServer.setts.gevent=False
-         parentServer._importAll(forceDelete=True)
-         # in threaded mode (also gevent) we can't use same socket for read and write
-         self._conn=UnixHTTPConnection(self.socketPath)
+      #we need this dummy for some methods from it and there we store gevent's status
+      self._server=flaskJSONRPCServer(['', ''], gevent=(not(self.settings.disableGeventInChild) and self.settings.allowThreads and self._parentServer.setts.gevent), log=self._parentServer.setts.log, jsonBackend=self._jsonBackend, tweakDescriptors=None, experimental=self._parentServer.settings.experimental, controlGC=self._parentServer.settings.controlGC)
+      # patching or un-patching (main program can patch themselve before execBackend will be started. in this case patched version of libs fall in child process)
+      self._server._importAll(forceDelete=True, scope=globals())
+      if self.settings.allowThreads:
+         # in threaded mode (also gevent) we can't use same socket for concurrent connections
+         self._conn=None
+      else:
+         if self._server.settings.gevent:
+            from gevent import socket as sockClass
+         else:
+            import socket as sockClass
+         self._conn=UnixHTTPConnection(self.socketPath, socketClass=sockClass)
       # create hashmap for parentGlobals
       self.parentGlobalsMap={}
       if self.settings.importGlobalsFromParent:
          for k, v in self.parentGlobals.items():
             if self._server._isFunction(v) or self._server._isModule(v): continue
             self.parentGlobalsMap[k]=self.var2hash(v, k)
-      # overload some methods in parentServer
+      # overload some methods in parentServer (becouse _callDispatcher will be executed in his context)
       self.childDisableNotImplemented()
-      parentServer.stats=lambda inMS=False: self.sendRequest('/parent', 'stats', [inMS])
-      parentServer.lock=lambda dispatcher=None: self.sendRequest('/parent', 'lock', [(None if dispatcher is None else dispatcher._id)])
-      parentServer.unlock=lambda dispatcher=None, exclusive=False: self.sendRequest('/parent', 'unlock', [(None if dispatcher is None else dispatcher._id), exclusive])
-      parentServer.wait=self.childWait
-      parentServer._speedStatsAdd=self.childSpeedStatsAdd
+      self._parentServer.stats=lambda inMS=False: self.sendRequest('/parent', 'stats', [inMS])
+      self._parentServer.lock=lambda dispatcher=None: self.sendRequest('/parent', 'lock', [(None if dispatcher is None else dispatcher._id)])
+      self._parentServer.unlock=lambda dispatcher=None, exclusive=False: self.sendRequest('/parent', 'unlock', [(None if dispatcher is None else dispatcher._id), exclusive])
+      self._parentServer.wait=self.childWait
+      self._parentServer._speedStatsAdd=self.childSpeedStatsAdd
+      # also replace some methods to version from self._server
+      self.childReplaceToPatched()
+      # overload logger globally for child
       self._serverOriginalMethods._logger=self._server._logger
       self._server._logger=self.childLogger
-      parentServer._logger=self.childLogger
+      self._parentServer._logger=self.childLogger
       # main cicle
       while True:
          self.childSendLazyRequest()
@@ -270,11 +289,15 @@ class execBackend:
          if p=='__stop__': sys.exit(0)
          elif p:
             if self.settings.allowThreads:
-               parentServer._thread(self.childCallDispatcher, args=[p])
-            else: self.childCallDispatcher(p)
-            continue
-         if not self.settings.persistent_queueGet: # pause only need for non-persistent-mode
-            parentServer._sleep(self.settings.sleepTime_emptyQueue)
+               self._server._thread(self.childCallDispatcher, args=[p])
+               if self._server.setts.gevent:
+                  # need small pause (really small, but not 0), for prevent greenlet switching BEFORE new greenlet started. i'm think it's bug in gevent. new greenlet must start before next line of code will be executed
+                  self._server._sleep(0.01)
+            else:
+               self.childCallDispatcher(p)
+         elif not self.settings.persistent_queueGet:
+            # pause only need for non-persistent-mode
+            self._server._sleep(self.settings.sleepTime_emptyQueue)
 
    def childLogger(self, level, *args):
       level, args=self._server._loggerPrep(level, args)
@@ -282,24 +305,24 @@ class execBackend:
       self._serverOriginalMethods._logger(level, *args)
 
    def childSendLazyRequest(self):
-      if self._lazyRequestLatTime is None: self._lazyRequestLatTime=self._server._getms()
-      if self._lazyRequestLatTime is not True and self._server._getms()-self._lazyRequestLatTime<self.settings.sleepTime_lazyRequest: return
+      if self._lazyRequestLastTime is None: self._lazyRequestLastTime=self._server._getms()
+      if self._lazyRequestLastTime is not True and self._server._getms()-self._lazyRequestLastTime<self.settings.sleepTime_lazyRequest: return
       for rId, v in self._lazyRequest.items():
          if not len(v): continue
          path=self._server._strGet(rId, '', '<')
          self._lazyRequest[rId]=v[self.settings.lazyRequestChunk:]
          self.sendRequest(path, v[:self.settings.lazyRequestChunk])
          if len(v)>self.settings.lazyRequestChunk:
-            self._lazyRequestLatTime=True #shedule to next call
+            self._lazyRequestLastTime=True #shedule to next call
             return
-      self._lazyRequestLatTime=self._server._getms()
+      self._lazyRequestLastTime=self._server._getms()
 
    def childCallDispatcher(self, p):
-      self._server._logger(0, 'Processing with parallel-backend: %s()'%(p['dataIn']['method']))
+      self._server._logger(4, 'Processing with parallel-backend: %s()'%(p['dataIn']['method']))
       self._server.processingDispatcherCount+=1
       self._server._gcStats.processedDispatcherCount+=1
       p['request']=magicDict(p['request']) # _callDispatcher() work with this like object, not dict
-      status, params, result=self._parentServer._callDispatcher(p['uniqueId'], p['path'], p['dataIn'], p['request'], overload=self.childConnectionOverload, nativeThread=self.settings.allowThreads and not(self._parentServer.setts.gevent), isJSONP=p.get('isJSONP', False))
+      status, params, result=self._parentServer._callDispatcher(p['uniqueId'], p['path'], p['dataIn'], p['request'], overload=self.childConnectionOverload, nativeThread=not(self._server.setts.gevent), isJSONP=p.get('isJSONP', False))
       if not self.settings.saveResult:
          self._server.processingDispatcherCount-=1
          return
@@ -314,7 +337,7 @@ class execBackend:
 
    def childWait(self, dispatcher=None, sleepMethod=None, returnStatus=False):
       # parentServer.wait() is more complicated, becose it must check lock-status in parent, but suspend child
-      sleepMethod=sleepMethod or self._parentServer._sleep
+      sleepMethod=sleepMethod or self._server._sleep
       while self.sendRequest('/parent', 'wait', [(dispatcher._id if dispatcher else None)]):
          if returnStatus: return True
          sleepMethod(self.settings.sleepTime_waitLock)
@@ -325,7 +348,7 @@ class execBackend:
       if rId not in self._lazyRequest: self._lazyRequest[rId]=[]
       if not len(self._lazyRequest[rId]):
          self._lazyRequest[rId].append({'path':'/parent', 'method':'speedStatsAdd', 'params':[[], []]})
-      self._lazyRequest[rId][0]['params'][0].append('execBackend_%s'%name)
+      self._lazyRequest[rId][0]['params'][0].append('%s_%s'%(self._id, name))
       self._lazyRequest[rId][0]['params'][1].append(val)
 
    def childConnectionOverload(self, _connection):
@@ -340,13 +363,19 @@ class execBackend:
       return _connection
 
    def childDisableNotImplemented(self):
-      # disable none-implemented methods in parentServer
-      whiteList=['_callDispatcher', '_checkFileDescriptor', '_compressResponse', '_compressGZIP', '_uncompressGZIP', '_copyRequestContext', '_countFileDescriptor', '_fileGet', '_fileWrite', '_fixJSON', '_formatPath', '_getErrorInfo', '_getms', '_getScriptName', '_getScriptPath', '_getServerUrl', '_import', '_importAll', '_importSocket', '_importThreading', '_inChild', '_isArray', '_isDict', '_isFunction', '_isInstance', '_isNum', '_isString', '_logger', '_loggerPrep', '_parseJSON', '_parseRequest', '_prepResponse', '_serializeJSON', '_sha1', '_sha256', '_strGet', '_throw', '_tweakLimit', 'fixJSON', '_sleep', '_thread', '_randomEx', '_controlGC', '_countMemory', '_calcMimeType']
+      # disable none-implemented methods in parentServer for preventing call them from dispatcher
+      whiteList=['_callDispatcher', '_checkFileDescriptor', '_compressResponse', '_copyRequestContext', '_countFileDescriptor', '_fixJSON', '_formatPath', '_getErrorInfo', '_getms', '_getScriptName', '_getScriptPath', '_getServerUrl', '_inChild', '_isArray', '_isDict', '_isFunction', '_isInstance', '_isModule', '_isNum', '_isString', '_parseRequest', '_prepResponse', '_strGet', '_tweakLimit', 'fixJSON', '_sleep', '_thread', '_randomEx', '_countMemory', '_calcMimeType']
       for name in dir(self._parentServer):
          if not self._parentServer._isFunction(getattr(self._parentServer, name)): continue
          if name not in whiteList:
             s='Method "%s" not implemented in parallel backend'%(name)
-            setattr(self._parentServer, name, lambda __msg=s, *args, **kwargs: self._parentServer._throw(__msg))
+            setattr(self._parentServer, name, lambda __msg=s, *args, **kwargs: self._server._throw(__msg))
+
+   def childReplaceToPatched(self):
+      # replace some methods in parentServer to patched (of modified) methods from this process
+      whatList=['_compressGZIP', '_uncompressGZIP', '_fileGet', '_fileWrite', '_import', '_importAll', '_importSocket', '_importThreading', '_logger', '_loggerPrep', '_parseJSON', '_serializeJSON', '_sha1', '_sha256', '_throw', '_sleep', '_thread', '_controlGC']
+      for name in whatList:
+         setattr(self._parentServer, name, getattr(self._server, name))
 
    def childEval(self, code, scope=None, wait=True, cb=None, isExec=False, _connection=None):
       def tFunc(o, self):
@@ -372,7 +401,7 @@ class execBackend:
             if data['error']:
                if self._server._isFunction(data['cb']):
                   return data['cb'](None, data['error'], _connection)
-               else: self._parentServer._throw(data['error'])
+               else: self._server._throw(data['error'])
             res={}
             for k, r in data['result'].items():
                if not r[0]: # not changed
@@ -449,7 +478,8 @@ class execBackend:
             while not len(self.queue):
                self._server._sleep(self.settings.sleepTime_emptyQueue)
       tArr1=self.queue.popleft()
-      self._parentServer.processingDispatcherCount+=1
+      if self.settings.saveResult:
+         self._parentServer.processingDispatcherCount+=1
       return tArr1
 
    def api_queueResult(self, uniqueId, status, params, result, _connection=None):
