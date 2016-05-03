@@ -8,11 +8,14 @@ This module contains dispatcher-execution backend for flaskJSONRPCServer.
 if __name__=='__main__':
    import sys, os
    sys.path.append(os.path.dirname(os.path.realpath(sys.argv[0]))+'/..')
+   from __init__ import flaskJSONRPCServer, experimentalPack
    from utils import magicDict, UnixHTTPConnection
+   from types import InstanceType, IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, ModuleType, FunctionType
 else:
    import sys, os
    from ..__init__ import flaskJSONRPCServer, experimentalPack
    from ..utils import magicDict, UnixHTTPConnection, virtVar
+   from types import InstanceType, IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, ModuleType, FunctionType
 
 class execBackend:
    """
@@ -46,7 +49,10 @@ class execBackend:
          'saveResult':saveResult,
          'persistent_queueGet':persistent_queueGet,
          'useCPickle':useCPickle,
-         'disableGeventInChild':disableGeventInChild
+         'disableGeventInChild':disableGeventInChild,
+         'importGlobalsFromParent_typeForEval':None,
+         'importGlobalsFromParent_typeForVarCheck':[IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, DictType, ListType, TupleType],
+         'mergeGlobalsToParent_typeForEval':'[IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, TupleType]'
       })
       from collections import deque
       self.parentGlobals=parentGlobals or {}
@@ -70,24 +76,23 @@ class execBackend:
    def start(self, server):
       if self._server: return
       if not server.setts.gevent:
-         server._throw('ExecBackend "parallelWithSocket" not implemented for Flask backend yet')
+         server._throw('ExecBackend "parallelWithSocket" not implemented for Werkzeug backend')
       # warnings
       if self.settings.useCPickle:
          server._logger(2, 'WARNING: cPickle is slow backend')
+      # convert to tuple
+      if self.settings.importGlobalsFromParent_typeForVarCheck is not None and not server._isTuple(self.settings.importGlobalsFromParent_typeForVarCheck):
+         self.settings.importGlobalsFromParent_typeForVarCheck=tuple(self.settings.importGlobalsFromParent_typeForVarCheck)
       # choise json-backend
       if self._jsonBackend is None: self._jsonBackend=server.jsonBackend
       # generate access token
       self.token='--'.join([server._randomEx(999999) for i in xrange(30)])
       # import parent's globals if needed
       if self.settings.importGlobalsFromParent:
-         server._importGlobalsFromParent(scope=self.parentGlobals)
+         deniedNames=['__builtins__'] #! add other
+         server._importGlobalsFromParent(scope=self.parentGlobals, typeOf=self.settings.importGlobalsFromParent_typeForVarCheck, filterByName=deniedNames, filterByNameReversed=True)
       # start processesPool
       listeners=[]
-      """
-      if this block go after starting new API, server has really strange problems with "doubled" variables and etc.
-      But if this code go before "self._server.start()", all work fine.
-      I not understand why this happened and i spend more then two days for debugging.
-      """
       from ..utils import gmultiprocessing
       for i in xrange(self.settings.poolSize): # multiprocessing.cpu_count()
          # generate socket-file for API
@@ -95,11 +100,15 @@ class execBackend:
          if os.path.exists(self.socketPath): os.remove(self.socketPath)
          listeners.append(self.socketPath)
          # run child process
-         # p=gipc.start_process(target=self.childCicle, args=(server, i))
-         #! нужно попытаться избавиться от необходимости передавать в дочерний процесс инстанс сервера
+         """
+         Нужно попытаться избавиться от необходимости передавать в дочерний процесс инстанс сервера.
+         Тащемто это частично поможет запускать дочерние процессы на удаленном сервере.
+         """
          p=gmultiprocessing.Process(target=self.childCicle, args=(server, i))
          p.start()
+         setattr(p, '_id', '%s#child_%s'%(self._id, i))
          self._pool.append(p)
+         server._logger(4, 'Started child-process <%s>'%p._id)
       # create socket for API
       from gevent import socket
       for i, lPath in enumerate(listeners):
@@ -139,15 +148,20 @@ class execBackend:
          tArr=[p for p in self._pool if p.is_alive()]
          if not len(tArr): break
          elif timeout and server._getms()-mytime>=timeout*1000:
+            server._logger(3, 'Terminate child-proceses (%s) by timeout'%(len(tArr)))
             for p in tArr:
-               try: p.terminate()
-               except Exception, e: pass
+               try:
+                  p.terminate()
+                  server._logger(4, 'Terminated child-process <%s>'%p._id)
+               except Exception, e:
+                  server._logger(4, 'Error while terminating child-process <%s>: %s'%(p._id, e))
             break
       self._pool=[]
       self._forceStop=False
       # stop api
       self._server.stop(timeout=timeout-(server._getms()-mytime)/1000.0)
       self._server=None
+      self.token=None
 
    def add(self, uniqueId, path, dataIn, request, isJSONP=False):
       #callback for adding request to queue
@@ -223,6 +237,9 @@ class execBackend:
       return data2.get('result', None)
 
    def sendRequestEx(self, data, async=False, cb=None, returnAllData=False):
+      """
+      Если <async> равен True и не задан <cb>, запрос будет отправлен как notify-request в текущем потоке. Если же <cb> задан, обычный запрос выполнится в новом потоке и вызовет <cb> по окончании.
+      """
       # helper
       def tFunc(self, data, async, cb):
          data['error']=None
@@ -263,11 +280,12 @@ class execBackend:
             import socket as sockClass
          self._conn=UnixHTTPConnection(self.socketPath, socketClass=sockClass)
       # create hashmap for parentGlobals
-      self.parentGlobalsMap={}
+      self.parentGlobals_oldHash={}
       if self.settings.importGlobalsFromParent:
          for k, v in self.parentGlobals.items():
-            if self._server._isFunction(v) or self._server._isModule(v): continue
-            self.parentGlobalsMap[k]=self.var2hash(v, k)
+            if not isinstance(v, self.settings.importGlobalsFromParent_typeForVarCheck): continue
+            h=self.var2hash(v, k)
+            if h: self.parentGlobals_oldHash[k]=h
       # overload some methods in parentServer (becouse _callDispatcher will be executed in his context)
       self.childDisableNotImplemented()
       self._parentServer.stats=lambda inMS=False: self.sendRequest('/parent', 'stats', [inMS])
@@ -286,7 +304,9 @@ class execBackend:
          self.childSendLazyRequest()
          if self._server.settings.controlGC: self._server._controlGC() # call GC manually
          p=self.sendRequest('/queue', 'get')
-         if p=='__stop__': sys.exit(0)
+         if p=='__stop__':
+            self._server._logger(4, 'Stopping')
+            sys.exit(0)
          elif p:
             if self.settings.allowThreads:
                self._server._thread(self.childCallDispatcher, args=[p])
@@ -357,9 +377,9 @@ class execBackend:
       _connection['parallelPoolSize']=self.settings.poolSize
       _connection['parallelId']=self._id
       # wrap methods for passing "_connection" object
-      _connection['call']['execute']=lambda code, scope=None, wait=True, cb=None: self.childEval(code, scope=scope, wait=wait, cb=cb, isExec=True, _connection=magicDict(_connection))
-      _connection['call']['eval']=lambda code, scope=None, wait=True, cb=None: self.childEval(code, scope=scope, wait=wait, cb=cb, isExec=False, _connection=magicDict(_connection))
-      _connection['call']['copyGlobal']=lambda var, actual=True, cb=None: self.childCopyGlobal(var, actual=actual, cb=cb, _connection=magicDict(_connection))
+      _connection['call']['execute']=lambda code, scope=None, mergeGlobals=True, wait=True, cb=None: self.childEval(code, scope=scope, wait=wait, cb=cb, isExec=True, mergeGlobals=mergeGlobals, _connection=magicDict(_connection))
+      _connection['call']['eval']=lambda code, scope=None, wait=True, cb=None: self.childEval(code, scope=scope, wait=wait, cb=cb, isExec=False, mergeGlobals=False, _connection=magicDict(_connection))
+      _connection['call']['copyGlobal']=lambda name, actual=True, cb=None: self.childCopyGlobal(name, actual=actual, cb=cb, _connection=magicDict(_connection))
       return _connection
 
    def childDisableNotImplemented(self):
@@ -377,26 +397,28 @@ class execBackend:
       for name in whatList:
          setattr(self._parentServer, name, getattr(self._server, name))
 
-   def childEval(self, code, scope=None, wait=True, cb=None, isExec=False, _connection=None):
-      def tFunc(o, self):
-         o['cb'](o['result'], o['error'], _connection)
-      data={'path':'/parent', 'method':'eval', 'params':[code, scope, isExec], 'cb':cb}
-      self.sendRequestEx(data, async=not(wait), cb=(tFunc if self._server._isFunction(cb) else None))
+   def childEval(self, code, scope=None, wait=True, cb=None, isExec=False, mergeGlobals=False, _connection=None):
+      #! сделать обработку ошибок и развернуть код для наглядности
+      def tFunc(data, self):
+         data['cb'](data['result'], data['error'], _connection)
+      data={'path':'/parent', 'method':'eval', 'params':[code, scope, isExec, mergeGlobals], 'cb':cb}
+      return self.sendRequestEx(data, async=not(wait), cb=(tFunc if self._server._isFunction(cb) else None))
 
-   def childCopyGlobal(self, var, actual=True, cb=None, _connection=None):
+   def childCopyGlobal(self, name, actual=True, cb=None, _connection=None):
       # if callback passed, method work in async mode
-      vars=var if self._server._isArray(var) else [var]
+      nameArr=name if self._server._isArray(name) else [name]
       res={}
       if not actual and self.settings.importGlobalsFromParent:
          # get from cache without checking
-         for k in vars:
+         for k in nameArr:
             res[k]=self.parentGlobals.get(k, None)
             self._server._logger(4, 'CopyGlobal var "%s": without checking'%k)
          if self._server._isFunction(cb):
-            cb((res if self._server._isArray(var) else res.values()[0]), False, _connection)
+            cb((res if self._server._isArray(name) else res.values()[0]), False, _connection)
       else:
-         hashs=[self.parentGlobalsMap.get(k, None) for k in vars]
-         data={'path':'/parent', 'method':'varCheck', 'params':[hashs, vars, True], 'cb':cb, 'onlyOne':not(self._server._isArray(var))}
+         #! проверить разные варианты создания словаря по скорости
+         nameHash=dict((k, self.parentGlobals_oldHash.get(k, None)) for k in nameArr)
+         data={'path':'/parent', 'method':'varCheck', 'params':[nameHash, True], 'cb':cb, 'onlyOne':not(self._server._isArray(name))}
          def tFunc(data, self):
             if data['error']:
                if self._server._isFunction(data['cb']):
@@ -410,7 +432,7 @@ class execBackend:
                elif r[1] is None: # not founded or not hashable
                   res[k]=None
                   if k in self.parentGlobals:
-                     del self.parentGlobalsMap[k]
+                     del self.parentGlobals_oldHash[k]
                      del self.parentGlobals[k]
                   self._server._logger(4, 'CopyGlobal var "%s": not founded or not hashable'%k)
                else: # changed
@@ -418,7 +440,7 @@ class execBackend:
                   # need to deseriolize value
                   v=self._server._parseJSON(v)
                   res[k]=v
-                  self.parentGlobalsMap[k]=r[1]
+                  self.parentGlobals_oldHash[k]=r[1]
                   self.parentGlobals[k]=v
                   self._server._logger(4, 'CopyGlobal var "%s": changed'%k)
             if self._server._isFunction(data['cb']):
@@ -426,7 +448,12 @@ class execBackend:
             else: data['result']=res
          res=self.sendRequestEx(data, async=self._server._isFunction(cb), cb=tFunc)
          if self._server._isFunction(cb): return
-      return (res if self._server._isArray(var) else res.values()[0])
+      #return result
+      if self._server._isArray(name):
+         # sorting result in same order, that requested
+         return [res[k] for k in name]
+      else:
+         return res.values()[0]
 
    def childRemoteVar(self, name, default=None, clear=False):
       """
@@ -463,7 +490,7 @@ class execBackend:
          if returnSerialized: return h, s
          else: return h
       except Exception, e:
-         self._server._logger(1, 'ERROR: Cant hash variable "%s#%s": %s'%(name, type(var), e))
+         self._server._logger(1, 'ERROR: Cant hash variable "%s(%s)": %s'%(name, type(var), e))
          if returnSerialized: return None, None
          else: return None
 
@@ -476,6 +503,7 @@ class execBackend:
          if not self.settings.persistent_queueGet: return None
          else:
             while not len(self.queue):
+               if self._forceStop: return '__stop__'
                self._server._sleep(self.settings.sleepTime_emptyQueue)
       tArr1=self.queue.popleft()
       if self.settings.saveResult:
@@ -497,52 +525,63 @@ class execBackend:
          self._parentServer._throw('Access denied') # tokens not match
       return self._parentServer.stats(inMS=inMS)
 
-   def api_parentEval(self, code, scope=None, isExec=False, _connection=None):
+   def api_parentEval(self, code, scope=None, isExec=False, mergeGlobals=False, _connection=None):
       if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
          self._server._throw('Access denied') # tokens not match
       # eval code in parent process
+      if not isExec and mergeGlobals:
+         self._server._throw('Merging globals work only with isExec=True')
       try:
-         scope=scope if scope is None else scope
-         if scope and not self._server._isDict(scope): # scope passed as names
+         # prepare scope
+         if scope is None: #auto import from parent
+            scope=self._parentServer._importGlobalsFromParent(typeOf=self.settings.importGlobalsFromParent_typeForEval)
+         elif not scope: scope={} #empty
+         elif not self._server._isDict(scope): # scope passed as names or some scopes
             scope=scope if self._server._isArray(scope) else [scope]
-            tArr={}
+            tArr1={}
+            tArr2=self._parentServer._importGlobalsFromParent(typeOf=self.settings.importGlobalsFromParent_typeForEval)
             for s in scope:
-               if s=='_globals': tArr.update(self.parentGlobals)
-               elif self._server._isDict(s): tArr.update(s)
-               elif self._server._isString(s): tArr[s]=self.parentGlobals.get(s, None)
-            scope=tArr
-         if scope is None:
-            scope={}
-            self._parentServer._importGlobalsFromParent(scope=scope)
-         scope['__server__']=self._parentServer # add server instance to scope
+               if s is None: tArr1.update(tArr2)
+               elif self._server._isDict(s): tArr1.update(s)
+               elif self._server._isString(s): tArr1[s]=tArr2.get(s, None)
+            scope=tArr1
+         # add server instance to scope
+         scope['__server__']=self._parentServer
+         # prepare merging code
+         if mergeGlobals:
+            s1=self._server._serializeJSON(mergeGlobals) if self._server._isArray(mergeGlobals) else 'None'
+            s2='None'
+            if self._server._isString(self.settings.mergeGlobalsToParent_typeForEval):
+               code+='\n\nfrom types import *'
+               s2=self.settings.mergeGlobalsToParent_typeForEval
+            elif self.settings.mergeGlobalsToParent_typeForEval is not None:
+               self._server._logger(1, 'ERROR: Variable "mergeGlobalsToParent_typeForEval" must be string')
+            code+='\n\n__server__._mergeGlobalsToParent(globals(), filterByName=%s, typeOf=%s)'%(s1, s2)
+         # execute
          s=compile(code, '<string>', 'exec' if isExec else 'eval')
-         res=eval(s, scope)
+         res=eval(s, scope, scope)
       except Exception, e:
          self._server._throw('Cant execute code: %s'%(e))
       return res
 
-   def api_parentVarCheck(self, hashs, vars, returnIfNotMatch, _connection=None):
+   def api_parentVarCheck(self, nameHash, returnIfNotMatch=True, _connection=None):
       if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
          self._server._throw('Access denied') # tokens not match
-      if len(hashs)!=len(vars):
-         self._server._throw('Wrong length')
-      if not self._server._isArray(hashs) or not self._server._isArray(vars):
-         self._server._throw('Arguments "vars" and "hashs" must be array')
-      scope={}
-      # typeOf=[IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, DictType, ListType, TupleType]
-      self._parentServer._importGlobalsFromParent(scope=scope)
+      if not self._server._isDict(nameHash):
+         self._server._throw('<nameHash> must be a dict')
       res={}
-      for i, k in enumerate(vars):
-         vHash=hashs[i]
-         if k not in scope: res[k]=[True, None, None]
+      # we use <typeOf> as callback for constructing result
+      def tFunc1(k, v):
+         if self.settings.importGlobalsFromParent_typeForVarCheck and not isinstance(v, self.settings.importGlobalsFromParent_typeForVarCheck): # not supported variable's type
+            res[k]=[True, None, None]
          else:
-            vv=scope[k]
-            # for faster processing, we save serialized var and pass to response it, not original var
-            vvHash, vvCache=self.var2hash(vv, k, returnSerialized=True)
-            if vvHash is None: res[k]=[True, None, None]
-            elif vHash!=vvHash:
-               res[k]=[True, vvHash, (vvCache if returnIfNotMatch else None)]
-            else: res[k]=[False, hash, None]
+            vHash, vSerialized=self.var2hash(v, k, returnSerialized=True)
+            if vHash is None: res[k]=[True, None, None]
+            elif vHash==nameHash[k]: res[k]=[False, vHash, None]
+            else:
+               res[k]=[True, vHash, (vSerialized if returnIfNotMatch else None)]
+         return False
+      self._parentServer._importGlobalsFromParent(filterByName=nameHash.keys(), typeOf=tFunc1)
       return res
 
    def api_parentLock(self, dispatcherId=None, _connection=None):

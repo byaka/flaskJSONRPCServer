@@ -33,6 +33,7 @@ from gzip import GzipFile
 Flask=None
 request=None
 Response=None
+gevent=None
 
 # from utils import UnixHTTPConnection, magicDict, virtVar
 from utils import magicDict, virtVar
@@ -67,6 +68,7 @@ class flaskJSONRPCServer:
    :param bool experimental: If 'True', server will be patched with 'experimental' package.
    :param bool controlGC: If 'True', server will control GarbageCollector and manually call 'gc.collect()' (by default every 60 minutes or 300k requests or 50k dispatcher's calls).
    :param str magicVarForDispatcher: Name for variable, that can be passed to every dispatcher and will contain many useful data and methods. For more info see <server>.aboutMagicVarForDispatcher.
+   :param str name: Optional name of server. Also used as flaskAppName. If not passed, it will be generated automatically.
    """
 
    def __init__(self, bindAdress, multipleAdress=False, blocking=False, cors=False, gevent=False, debug=False, log=3, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=2*1024*1024, jsonBackend='simplejson', notifBackend='simple', dispatcherBackend='simple', auth=None, experimental=False, controlGC=True, magicVarForDispatcher='_connection', name=None):
@@ -223,6 +225,15 @@ class flaskJSONRPCServer:
          if s in urlNow: continue
          self.flaskApp.add_url_rule(rule=s, view_func=h, methods=methods, strict_slashes=False)
 
+   def _tryGevent(self):
+      global gevent, geventMonkey
+      if gevent and geventMonkey: return False
+      try:
+         import gevent
+         from gevent import monkey as geventMonkey
+         return True
+      except ImportError: self._throw('gevent not found')
+
    def _import(self, modules, scope=None, forceDelete=True):
       """
       This methodReplace existed imported module and monke_putch if needed.
@@ -235,15 +246,15 @@ class flaskJSONRPCServer:
          if forceDelete and k in sys.modules: del sys.modules[k] # this allow unpatch monkey_patched libs
       # apply patchs
       if self.setts.gevent:
-         from gevent import monkey
+         self._tryGevent()
          for k, v in modules.items():
             if not v: continue
             v=v if self._isArray(v) else [v]
             patchName=v[0]
-            if not hasattr(monkey, patchName):
+            if not hasattr(geventMonkey, patchName):
                self._logger(2, 'Warning: unknown patch "%s"'%patchName)
                continue
-            patch=getattr(monkey, patchName)
+            patch=getattr(geventMonkey, patchName)
             patchSupported, _, _, _=inspect.getargspec(patch)
             patchArgs_default=v[1] if len(v)>1 else {}
             patchArgs={}
@@ -410,6 +421,8 @@ class flaskJSONRPCServer:
 
    def _isModule(self, o): return isinstance(o, (ModuleType))
 
+   def _isTuple(self, o): return isinstance(o, (tuple))
+
    def _isArray(self, o): return isinstance(o, (list))
 
    def _isDict(self, o): return isinstance(o, (dict))
@@ -557,25 +570,74 @@ class flaskJSONRPCServer:
       """
       raise ValueError(data)
 
+   def _thread(self, target, args=None, kwargs=None, forceNative=False):
+      """
+      This method is wrapper above threading.Thread() or gevent.spawn(). Method swithing automatically, if <forceNative> is False. If it's True, always use unpatched threading.Thread().
+
+      :param func target:
+      :param bool forceNative:
+      """
+      args=args or []
+      kwargs=kwargs or {}
+      if not self.settings.gevent:
+         t=threading.Thread(target=target, args=args, kwargs=kwargs)
+         t.start()
+      else:
+         self._tryGevent()
+         if forceNative:
+            if hasattr(gevent, '_threading'):
+               t=gevent._threading.start_new_thread(target, tuple(args), kwargs)
+            else:
+               try:
+                  thr=geventMonkey.get_original('threading', 'Thread')
+               except:
+                  self._throw('Cant find nativeThread implementation in gevent')
+               t=thr(target=target, args=args, kwargs=kwargs)
+               t.start()
+         else:
+            t=gevent.spawn(target, *args, **kwargs)
+      return t
+      # if forceNative and self.settings.gevent: #force using NATIVE python threads, insted of coroutines
+      #    import gevent
+      #    if hasattr(gevent, '_threading'):
+      #       t=gevent._threading.start_new_thread(target, tuple(args or []), kwargs or {})
+      #    else:
+      #       t=threading.Thread(target=target, args=args or [], kwargs=kwargs or {})
+      #       t.start()
+      # else:
+      #    self._importThreading(forceDelete=True)
+      #    t=threading.Thread(target=target, args=args or [], kwargs=kwargs or {})
+      #    t.start()
+      # return t
+
    def _sleep(self, s, forceNative=False):
       """
-      This method is wrapper above time.sleep() or gevent.sleep(). Method swithing automatically, if <forceNative> is False. If it's True, always use time.sleep().
+      This method is wrapper above time.sleep() or gevent.sleep(). Method swithing automatically, if <forceNative> is False. If it's True, always use unpatched time.sleep().
 
       :param int s: Delay in milliseconds.
       :param bool forceNative:
       """
-      if self.settings.gevent and not forceNative:
-         import gevent
-         _sleep=gevent.sleep
+      if not self.settings.gevent:
+         _sleep=time.sleep
       else:
-         try:
-            from gevent import monkey
-            _sleep=monkey.get_original('time', 'sleep')
-         except Exception, e:
-            print '!!!', e
-            self._importThreading(forceDelete=True)
-            _sleep=time.sleep
+         self._tryGevent()
+         if forceNative:
+            _sleep=geventMonkey.get_original('time', 'sleep')
+         else:
+            _sleep=gevent.sleep
       _sleep(s)
+      # if self.settings.gevent and not forceNative:
+      #    import gevent
+      #    _sleep=gevent.sleep
+      # else:
+      #    try:
+      #       from gevent import monkey
+      #       _sleep=monkey.get_original('time', 'sleep')
+      #    except Exception, e:
+      #       print '!!!', e
+      #       self._importThreading(forceDelete=True)
+      #       _sleep=time.sleep
+      # _sleep(s)
 
    def _getScriptPath(self, full=False, real=True):
       """
@@ -599,20 +661,6 @@ class flaskJSONRPCServer:
       if withExt: return os.path.basename(sys.argv[0])
       else: return os.path.splitext(os.path.basename(sys.argv[0]))[0]
 
-   def _thread(self, target, args=None, kwargs=None, forceNative=False):
-      if forceNative and self.settings.gevent: #force using NATIVE python threads, insted of coroutines
-         import gevent
-         if hasattr(gevent, '_threading'):
-            t=gevent._threading.start_new_thread(target, tuple(args or []), kwargs or {})
-         else:
-            t=threading.Thread(target=target, args=args or [], kwargs=kwargs or {})
-            t.start()
-      else:
-         self._importThreading(forceDelete=True)
-         t=threading.Thread(target=target, args=args or [], kwargs=kwargs or {})
-         t.start()
-      return t
-
    def _findParentModule(self):
       """
       This method find parent module and pass him to attr <_parentModule> of server.
@@ -628,30 +676,87 @@ class flaskJSONRPCServer:
          return self._logger(1, "Cant find parent's module")
       self._parentModule=m
 
-   def _importGlobalsFromParent(self, scope=None, typeOf=None):
+   def _importGlobalsFromParent(self, scope=None, typeOf=None, filterByName=None, filterByNameReversed=False):
       """
-      This function import global attrs from parent module (main program) to given scope.
-      Imported attrs can be filtered by type.
+      This function import global attributes from parent module (main program) to given scope.
+      Imported attributes can be filtered by type, by name or by callback.
       Source based on http://stackoverflow.com/a/9493520/5360266
+
+      :param None|dict scope: Scope for add or change resulting variables. If not passed, new will be created.
+      :param None|True|func(name,value)|list typeOf: Filtering by type or callback. If None, filtering disabled. If True, auto filtering by types [Int, Float, Long, Complex, None, Unicode, String, Boolean, Lambda, Dict, List, Tuple, Module, Function].
+      :param list filterByName: If passed, only variables with this names will be imported.
       """
       if self._inChild():
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       if self._parentModule is None:
          self._throw("Parent module not founded")
-      if typeOf is None:
+      if typeOf is True: # check by standart types
          typeOf=[IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, ModuleType, FunctionType]
       try:
          mytime=self._getms()
          scope=scope if scope is not None else {}
-         typeOf=tuple(typeOf) if typeOf is not None else None
-         for k in dir(self._parentModule):
-            # check type if needed
+         if not self._isFunction(typeOf):
+            typeOf=None if typeOf is None else tuple(typeOf)
+         if filterByName is None:
+            tArr1=dir(self._parentModule)
+         elif filterByNameReversed: #exclude specific names
+            tArr1=filterByName if self._isArray(filterByName) else [filterByName]
+            tArr1=[k for k in dir(self._parentModule) if k not in tArr1]
+         else: #include only specific names
+            tArr1=filterByName if self._isArray(filterByName) else [filterByName]
+         for k in tArr1:
             v=getattr(self._parentModule, k)
-            if typeOf is None or isinstance(v, typeOf): scope[k]=v
+            # check type if needed or use callback
+            if typeOf is None: pass
+            elif self._isFunction(typeOf) and not typeOf(k, v): continue
+            elif not isinstance(v, typeOf): continue
+            # importing
+            scope[k]=v
          self._speedStatsAdd('importGlobalsFromParent', self._getms()-mytime)
          return scope
       except Exception, e:
          self._throw("Cant import parent's globals: %s"%e)
+
+   def _mergeGlobalsToParent(self, scope, typeOf=None, filterByName=None, filterByNameReversed=False):
+      """
+      This function merge given scope with global attributes from parent module (main program).
+      Merged attributes can be filtered by type, by name or by callback.
+
+      :param dict scope: Scope that will be merged.
+      :param None|True|func(name,value)|list typeOf: Filtering by type or callback. If None, filtering disabled. If True, auto filtering by types [Int, Float, Long, Complex, None, Unicode, String, Boolean, Lambda, Dict, List, Tuple, Module, Function].
+      :param list filterByName: If passed, only variables with this names will be imported.
+      """
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
+      if self._parentModule is None:
+         self._throw("Parent module not founded")
+      if not self._isDict(scope):
+         self._throw("Incorrect scope type: %s"%type(scope))
+      if typeOf is True: # check by standart types
+         typeOf=[IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, FunctionType]
+      try:
+         mytime=self._getms()
+         if not self._isFunction(typeOf):
+            typeOf=None if typeOf is None else tuple(typeOf)
+         if filterByName is None:
+            tArr1=scope.keys()
+         elif filterByNameReversed: #exclude specific names
+            tArr1=filterByName if self._isArray(filterByName) else [filterByName]
+            tArr1=[k for k in scope.keys() if k not in tArr1]
+         else: #include only specific names
+            tArr1=filterByName if self._isArray(filterByName) else [filterByName]
+         for k in tArr1:
+            v=scope.get(k, None)
+            # check type if needed or use callback
+            if typeOf is None: pass
+            elif self._isFunction(typeOf) and not typeOf(k, v): continue
+            elif not isinstance(v, typeOf): continue
+            # merging
+            setattr(self._parentModule, k, v)
+         self._speedStatsAdd('mergeGlobalsToParent', self._getms()-mytime)
+         return scope
+      except Exception, e:
+         self._throw("Cant merge parent's globals: %s"%e)
 
    def _speedStatsAdd(self, name, val):
       """
@@ -890,12 +995,18 @@ class flaskJSONRPCServer:
       :param int level: Info-level of message. 0 is critical (and visible always), 1 is error, 2 is warning, 3 is info, 4 is debug. If is not number, it passed as first part of message.
       """
       level, args=self._loggerPrep(level, args)
-      if level is not 0 or level is not None: # critical or fallback msg
+      if level!=0 and level is not None: # critical or fallback msg
          if not self.setts.log: return
          elif self.setts.log is True: pass
          elif level>self.setts.log: return
+      levelPrefix=['', 'ERROR:', 'WARNING:', 'INFO:', 'DEBUG:']
       for i in xrange(len(args)):
          s=args[i]
+         # auto-prefix
+         if not i and level and level<5:
+            s2=levelPrefix[level]
+            if not self._isString(s) or not s.startswith(s2): sys.stdout.write(s2+' ')
+         # try to printing
          try: sys.stdout.write(s)
          except:
             try:
@@ -920,8 +1031,10 @@ class flaskJSONRPCServer:
       if dispatcher is None: self.locked=True #global lock
       else: #local lock
          if self._isFunction(dispatcher):
-            if hasattr(dispatcher, '__func__'): dispatcher.__func__.__locked=True
-            else: dispatcher.__locked=True
+            if hasattr(dispatcher, '__func__'):
+               setattr(dispatcher.__func__, '__locked', True)
+            else:
+               setattr(dispatcher, '__locked', True)
 
    def unlock(self, dispatcher=None, exclusive=False):
       """
@@ -937,14 +1050,16 @@ class flaskJSONRPCServer:
       if dispatcher is None: self.locked=False #global lock
       else: #local lock
          if self._isFunction(dispatcher):
-            if hasattr(dispatcher, '__func__'): dispatcher.__func__.__locked=False if exclusive else None
-            else: dispatcher.__locked=False if exclusive else None
+            if hasattr(dispatcher, '__func__'):
+               setattr(dispatcher.__func__, '__locked', False if exclusive else None)
+            else:
+               setattr(dispatcher, '__locked', False if exclusive else None)
 
    def wait(self, dispatcher=None, sleepMethod=None, returnStatus=False):
       """
-      This method wait while server or specific dispatcher locked.
+      This method wait while server (or specific <dispatcher>) locked or return locking status.
       If <returnStatus> is True, method only return locking status.
-      If <returnStatus> is False, method cyclically call <sleepMethod> until server or dispatcher locked.
+      If <returnStatus> is False, method cyclically call <sleepMethod> until server or <dispatcher> locked. If <sleepMethod> not passed, it will be automatically selected.
 
       :param func dispatcher:
       :param func sleepMethod:
@@ -963,9 +1078,12 @@ class flaskJSONRPCServer:
       else: #local and global lock
          if self._isFunction(dispatcher):
             while True:
-               s=getattr(dispatcher, '__locked', None)
-               if s is False: break #exclusive unlock
-               elif not s and not self.locked: break
+               if hasattr(dispatcher, '__func__'):
+                  locked=getattr(dispatcher.__func__, '__locked', None)
+               else:
+                  locked=getattr(dispatcher, '__locked', None)
+               if locked is False: break #exclusive unlock
+               elif not locked and not self.locked: break
                if returnStatus:
                   self._speedStatsAdd('wait', self._getms()-mytime)
                   return True
@@ -1046,15 +1164,21 @@ class flaskJSONRPCServer:
       """
       This method is wrapper above <server>._reload(). It overload server's source without stopping.
 
-      :param list(dict) api: {
-         'dispatcher':str() or <functiom>, # dispatcher's name (replace next param) or link to function (that will be loaded)
-         'dispatcherName':str(), # name of dispatcher that will overloaded
-         'scriptPath':str(), # path to source, that must be loaded
+      :Example:
+
+      # example of passed <api>
+      api={
+         'dispatcher':str() or "function" or "class's instance", # dispatcher's name (replace next param) or link to function (that will be loaded)
+         'name':str(), # name of dispatcher that will overloaded
+         'dispatcherName':str(), # same as <name>, for backward compatibility
+         'scriptPath':str(), # path to source, that must be loaded. If not passed, main program's path will be used
          'scriptName':str(), # don't use it
          'isInstance':bool(), # is passed dispatcher instance of class
          'overload':list(), # overload this attrs in source or call this function
-         'path':str() #
-         }
+         'path':str() # API path for dispatcher
+      }
+
+      :param list(dict)|dict api: see example
       :param bool clearOld:
       :param int timeout:
       :param int processingDispatcherCountMax:
@@ -1075,7 +1199,7 @@ class flaskJSONRPCServer:
          exclusiveDispatcher=o.get('exclusiveDispatcher', False)
          overload=o.get('overload', None)
          path=o.get('path', '')
-         name=o.get('dispatcherName', None)
+         name=o.get('name', o.get('dispatcherName', None))
          # start importing new code
          if scriptPath and dispatcherName and self._isString(dispatcherName):
             # passed path to module and name of dispatcher
@@ -1123,11 +1247,13 @@ class flaskJSONRPCServer:
                # so we need to find at least one Class method, stored previosly
                d=None
                p=self._formatPath(path)
-               for n in dir(dispatcher):
-                  link=getattr(dispatcher, n)
-                  if not self._isFunction(link): continue
-                  d=self.routes[p][n]
-                  break
+               if p in self.routes:
+                  for n in dir(dispatcher):
+                     link=getattr(dispatcher, n)
+                     if not self._isFunction(link): continue
+                     if n not in self.routes[p]: continue
+                     d=self.routes[p][n]
+                     break
                if d:
                   if allowJSONP is None: allowJSONP=d.allowJSONP
                   if dispatcherBackend is None: dispatcherBackend=d.dispatcherBackendId
@@ -1156,7 +1282,7 @@ class flaskJSONRPCServer:
       :param str mimeType: Request's MimeType. You can change this for setting MimeType of Response.
       :param bool allowCompress: Is compressing allowed for this request. You can change it for forcing compression.
       :param instance server: Link to server's instance.
-      :param set(isRawSocket,ip|socketPath,port|socket) servedBy: Info about server's adress. Usefull if you use multiple adresses for one server.
+      :param set(isRawSocket,(ip|socketPath),(port|socket)) servedBy: Info about server's adress. Usefull if you use multiple adresses for one server.
       :param dict('lock','unlock','wait','sleep','log',..) call: Some useful server's methods, you can call them.
       :param bool nativeThread: Is this request and dispatcher executed in native python thread.
       :param bool notify: Is this request is Notify-request.
@@ -1299,7 +1425,7 @@ class flaskJSONRPCServer:
       f.write(data)
       f.close()
       res=gzip_buffer.getvalue()
-      print '>> compression %s%%, original size %smb'%(round((1-len(res)/float(l))*100.0, 1), round(l/1024.0/1024.0, 2))
+      self._logger(4, '>> compression %s%%, original size %smb'%(round((1-len(res)/float(l))*100.0, 1), round(l/1024.0/1024.0, 2)))
       self._speedStatsAdd('compressResponse', self._getms()-mytime)
       return res
 
@@ -1578,10 +1704,10 @@ class flaskJSONRPCServer:
 
       :Example:
 
-      >>> server=flaskJSONRPCServer(["127.0.0.1", "8080"])
-      >>> print "before serveForever"
-      >>> server.serveForever()
-      >>> print "after serveForever" # you never see this message, while server runned
+      server=flaskJSONRPCServer(["127.0.0.1", "8080"])
+      print "before serveForever"
+      server.serveForever()
+      print "after serveForever" # you never see this message, while server runned
 
       :param bool restart:
       :param int sleep:
@@ -1636,18 +1762,18 @@ class flaskJSONRPCServer:
       if self.settings.allowCompress: self._logger(2, 'WARNING: included compression is slow')
       if self.setts.gevent:
          # serving with gevent's pywsgi
-         if self.setts.blocking: self._logger(2, 'WARNING: blocking mode not implemented for gevent')
-         try: from gevent import monkey
-         except ImportError: self._throw('gevent backend not found')
-         self._logger(3, 'SERVER RUNNING AS GEVENT..')
+         if self.setts.blocking:
+            self._logger(2, 'WARNING: blocking mode not implemented for gevent')
+         self._tryGevent()
+         self._logger(3, 'Server running as gevent..')
          # check what patches supports installed gevent version
-         monkeyPatchSupported, _, _, _=inspect.getargspec(monkey.patch_all)
+         monkeyPatchSupported, _, _, _=inspect.getargspec(geventMonkey.patch_all)
          monkeyPatchArgs_default={'socket':False, 'dns':False, 'time':False, 'select':True, 'thread':False, 'os':True, 'ssl':False, 'httplib':False, 'subprocess':True, 'sys':False, 'aggressive':True, 'Event':False, 'builtins':True, 'signal':True}
          monkeyPatchArgs={}
          for k, v in monkeyPatchArgs_default.items():
             if k in monkeyPatchSupported: monkeyPatchArgs[k]=v
          # monkey patching
-         monkey.patch_all(**monkeyPatchArgs)
+         geventMonkey.patch_all(**monkeyPatchArgs)
          self._importAll(forceDelete=True, scope=globals())
          from gevent.pywsgi import WSGIServer
          from gevent.pool import Pool

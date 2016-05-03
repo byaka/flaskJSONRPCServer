@@ -10,7 +10,7 @@ def restart(_connection=None):
    global needRestart
    needRestart=True
 
-testVar=1
+testVar='variable_from_parent'
 def testFunc(s):
    import gevent
    gevent.sleep(1)
@@ -18,51 +18,69 @@ def testFunc(s):
 
 def testScope(_connection=None):
    # original "testVar"
-   print '"testVar" in global scope:', _connection.call.eval('testFunc(testVar)')
+   _connection.call.log('"globals" imported:', _connection.call.eval('testFunc(testVar)'))
 
    # overloaded "testVar"
-   print '"testVar" in passed scope:', _connection.call.eval('testVar', scope={'testVar':2}) # we can't call testFunc() here, it's not defined
+   _connection.call.log('"testVar" passed to scope:', _connection.call.eval('testVar', scope={'testVar':'overloaded_variable'})) # we can't call testFunc() here, it's not defined
 
    # overloaded "testVar" but with original globals()
-   print '"testVar" in merged scope:', _connection.call.eval('testFunc(testVar)', scope=['_globals', {'testVar':2}])
+   _connection.call.log('"testVar" passed to merged scope, "globals" imported:', _connection.call.eval('testFunc(testVar)', scope=[None, {'testVar':'overloaded_variable'}]))
 
    # overloaded "testVar" but then over-overloaded with original globals()
-   print '"testVar" in wrong-merged scope:', _connection.call.eval('testFunc(testVar)', scope=[{'testVar':2}, '_globals'])
+   _connection.call.log('"testVar" passed to scope (but overloaded with globals), "globals" imported:', _connection.call.eval('testFunc(testVar)', scope=[{'testVar':'overloaded_variable'}, None]))
 
    # overloaded "testVar" and imported testFunc() from globals()
-   print '"testVar" in passed scope with imported:', _connection.call.eval('testFunc(testVar)', scope=[{'testVar':2}, 'testFunc'])
+   _connection.call.log('"testVar" passed to scope, "testFunc" imported:', _connection.call.eval('testFunc(testVar)', scope=[{'testVar':'overloaded_variable'}, 'testFunc']))
+
+   # overloaded "testVar" and no imported function, must return error
+   try: s=_connection.call.eval('testFunc(testVar)', scope={'testVar':'overloaded_variable'})
+   except Exception, e: s=e
+   _connection.call.log('"testVar" passed to scope, "testFunc" not imported:', s) # we can't call testFunc() here, it's not defined
 
 def testEvalCB(async=True, _connection=None):
    def tFunc1(res, err, _connection):
-      print '> From eval-callback', res, err
+      _connection.call.log('> From eval-callback', res, err)
    _connection.call.eval('testFunc(testVar)', cb=tFunc1, wait=not(async))
-   print '> After eval'
+   _connection.call.log('> After eval')
    return 'ok'
 
-def test1(_connection=None):
-   _connection.server.lock()
-   print '>>check locking from dispatcher', _connection.call.wait(returnStatus=True)
+def test1(onlySelf=False, _connection=None):
+   _connection.call.log('>>before locking')
+   if onlySelf: _connection.call.lock()
+   else: _connection.server.lock()
+   if onlySelf: s=_connection.call.wait(returnStatus=True)
+   else: s=_connection.server.wait(returnStatus=True)
+   _connection.call.log('>>check locking from dispatcher', s)
    _connection.call.sleep(5)
-   _connection.server.unlock()
+   if onlySelf: _connection.call.unlock()
+   else: _connection.server.unlock()
+   _connection.call.log('>>after locking')
    return 'test1'
+test1._alias='testLock'
 
-def test2(_connection=None):
+def test2(onlySelf=False, _connection=None):
    # if we ran this before test1(), this wait while test1() completed
    _connection.call.sleep(2)
-   print '>>before wait()'
-   _connection.call.wait()
-   print '>>after wait()'
+   _connection.call.log('>>before wait()')
+   if onlySelf: _connection.call.wait()
+   else: _connection.server.wait()
+   _connection.call.log('>>after wait()')
    return 'test2'
+test2._alias='testWait'
 
 def test3(_connection=None):
    # this will rise error, becouse this method not implemented yet
    _connection.server.reload()
    return 'test3'
+test3._alias='testNotImplemented'
 
 def test4(_connection=None):
    # simple sleep
+   _connection.call.log('>>before sleep()')
    _connection.call.sleep(5)
+   _connection.call.log('>>after sleep()')
    return 'ok'
+test4._alias='testSleep'
 
 testCopyGlobal=[]
 def testCopyGlobal_proc(_connection=None):
@@ -92,9 +110,9 @@ def testCopyGlobal_async(_connection=None):
    if not _connection.get('parallelType', False):
       return '!! this metod for testind parallel exec-backend, but you dont use it !!'
    def tFunc(res, err, _connection):
-      print '> From copyGlobal-callback', err, len(res)
+      _connection.call.log('> From copyGlobal-callback', err, len(res))
    _connection.call.copyGlobal('testCopyGlobal', actual=True, cb=tFunc)
-   print '> After copyGlobal'
+   _connection.call.log('> After copyGlobal')
    return 'ok'
 
 def echo(data='Hello world', _connection=None):
@@ -123,11 +141,14 @@ def sexyNum(n=None, _connection=None):
          tArr1=_connection.call.eval('sorted([s for s in sexy_speedStats.keys() if s!=%s])'%n)
       else: # in simple backend, variable in our globals
          tArr1=sorted([s for s in sexy_speedStats.keys() if s!=n])
-      for i, s in enumerate(tArr1):
-         if i<len(tArr1)-1 and s<n and tArr1[i+1]>n:
-            near=['nearest', s if(n-s<n-tArr1[i+1]) else tArr1[i+1]]
-            break
-   if len(near):
+      if len(tArr1)<3: near='Too low stats for find nearest'
+      else:
+         for i, s in enumerate(tArr1):
+            if i<len(tArr1)-1 and s<n and tArr1[i+1]>n:
+               near=['nearest (%s)'%s, s if(n-s<n-tArr1[i+1]) else tArr1[i+1]]
+               break
+   if _connection.server._isString(near): pass
+   elif len(near):
       if _connection.get('parallelType', False): # in parallel backend, need to access parent's memory
          s=_connection.call.eval('round(sum(sexy_speedStats[%(s)s])/len(sexy_speedStats[%(s)s]), 1)'%({'s':near[1]}))
       else: # in simple backend, variable in our globals
@@ -154,7 +175,7 @@ if __name__=='__main__':
    #    <tweakDescriptors> set descriptor's limit for server
    #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
    #    <notifBackend>     set backend for Notify-requests
-   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', tweakDescriptors=[1000, 1000], dispatcherBackend='parallelWithSocket', notifBackend='simple', experimental=True)
+   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=3, fallback=True, allowCompress=False, jsonBackend='simplejson', tweakDescriptors=[1000, 1000], dispatcherBackend='parallelWithSocket', notifBackend='simple', experimental=True)
    # Register dispatchers for single functions
    server.registerFunction(stats, path='/api', dispatcherBackend='simple')
    server.registerFunction(test1, path='/api')
@@ -185,8 +206,12 @@ if __name__=='__main__':
       if needRestart:
          needRestart=False
          print 'Restarting..'
-         server.restart()
-         print 'ok'
+         # server.restart()
+         server.stop()
+         print '> stopped'
+         server._sleep(5)
+         server.start()
+         print '>restarted'
    # Now you can access this api by path http://127.0.0.1:7001/api for JSON-RPC requests
    # Or by path http://127.0.0.1:7001/api/<method>?jsonp=<callback>&(params) for JSONP requests
    #    For example by http://127.0.0.1:7001/api/echo?data=test_data&jsonp=jsonpCallback_129620

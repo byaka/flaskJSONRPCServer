@@ -1,24 +1,42 @@
 # -*- coding: utf-8 -*-
 """
-Source gettted from project GIPC.
+Add compatibility for gevent and multiprocessing.
+Source based on project GIPC 0.6.0
 https://bitbucket.org/jgehrcke/gipc/
 """
 
 import os, sys, signal, multiprocessing, multiprocessing.process, multiprocessing.reduction
-import gevent, gevent.os, gevent.lock, gevent.event
 
-def Process(target, args=(), kwargs={}, daemon=None, name=None):
+# import gevent, gevent.os, gevent.lock, gevent.event
+
+gevent=None
+geventEvent=None
+
+def _tryGevent():
+   global gevent, geventEvent
+   if gevent and geventEvent: return False
+   try:
+      import gevent
+      from gevent import event as geventEvent
+      return True
+   except ImportError:
+      raise ValueError('gevent not found')
+
+def Process(target, args=(), kwargs={}, name=None): # daemon=None
+   # check if gevent availible
+   try: _tryGevent()
+   except ValueError:
+      return multiprocessing.Process(target=target, args=args, kwargs=kwargs, name=name)
    if not isinstance(args, tuple):
-      raise TypeError('`args` must be a tuple.')
+      raise TypeError('<args> must be a tuple')
    if not isinstance(kwargs, dict):
-      raise TypeError('`kwargs` must be a dictionary.')
+      raise TypeError('<kwargs> must be a dict')
    p = _GProcess(
       target=_child,
       name=name,
       kwargs={"target": target, "args": args, "kwargs": kwargs}
    )
-   if daemon is not None:
-      p.daemon = daemon
+   # if daemon is not None: p.daemon = daemon
    return p
 
 
@@ -26,6 +44,7 @@ def _child(target, args, kwargs):
    """Wrapper function that runs in child process. Resets gevent/libev state
    and executes user-given function.
    """
+   _tryGevent()
    _reset_signal_handlers()
    gevent.reinit()
    hub = gevent.get_hub()
@@ -59,8 +78,7 @@ class _GProcess(multiprocessing.Process):
       # started after the child exits. Start child watcher now.
       self._sigchld_watcher = gevent.get_hub().loop.child(self.pid)
       self._returnevent = gevent.event.Event()
-      self._sigchld_watcher.start(
-         self._on_sigchld, self._sigchld_watcher)
+      self._sigchld_watcher.start(self._on_sigchld, self._sigchld_watcher)
 
    def _on_sigchld(self, watcher):
       """Callback of libev child watcher. Called when libev event loop
@@ -90,16 +108,12 @@ class _GProcess(multiprocessing.Process):
    def __repr__(self):
       exitcodedict = multiprocessing.process._exitcode_to_name
       status = 'started'
-      if self._parent_pid != os.getpid():
-         status = 'unknown'
-      elif self.exitcode is not None:
-         status = self.exitcode
-      if status == 0:
-         status = 'stopped'
+      if self._parent_pid != os.getpid(): status = 'unknown'
+      elif self.exitcode is not None: status = self.exitcode
+      if status == 0: status = 'stopped'
       elif isinstance(status, int):
          status = 'stopped[%s]' % exitcodedict.get(status, status)
       return '<%s(%s, %s%s)>' % (type(self).__name__, self._name, status, self.daemon and ' daemon' or '')
-
 
    def join(self, timeout=None):
       """
@@ -116,11 +130,9 @@ class _GProcess(multiprocessing.Process):
       # `self._returnevent.wait(timeout)`
       self._returnevent.wait(timeout)
       if self._popen.returncode is not None:
-         if hasattr(multiprocessing.process, '_children'):
-            # This is for Python 3.4.
+         if hasattr(multiprocessing.process, '_children'): # This is for Python 3.4.
             kids = multiprocessing.process._children
-         else:
-            # For Python 2.6, 2.7, 3.3.
+         else: # For Python 2.6, 2.7, 3.3.
             kids = multiprocessing.process._current_process._children
          kids.discard(self)
 

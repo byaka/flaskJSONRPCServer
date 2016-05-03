@@ -8,10 +8,12 @@ This module contains dispatcher-execution backend for flaskJSONRPCServer.
 if __name__=='__main__':
    import sys, os
    sys.path.append(os.path.dirname(os.path.realpath(sys.argv[0]))+'/..')
+   from __init__ import experimentalPack
    from utils import magicDict
 else:
-   # from flaskJSONRPCServer.utils import magicDict
-   from ..__init__ import *
+   import sys, os
+   from ..__init__ import experimentalPack
+   from ..utils import magicDict
 
 class execBackend:
    """

@@ -27,7 +27,7 @@ def stats(_connection=None):
 
 if __name__=='__main__':
    print 'Running api..'
-   # create and manually config execBackend
+   # create and manually config execBackends
    #    <id>               unique ID of backend
    #    <poolSize>         count of child processes
    #    <saveResult>       switch notify-requests mode. for using like notifBackend set to False
