@@ -1,4 +1,4 @@
-|PyPI version| |PyPI downloads| |License|
+|python27| |License| |PyPI version| |PyPI downloads|
 
 flaskJSONRPCServer
 ==================
@@ -8,38 +8,32 @@ protocol. It supports only json-rpc 2.0 specification for now, which
 includes batch submission, keyword arguments, notifications, etc.
 
 Comments, bug reports
----------------------
+~~~~~~~~~~~~~~~~~~~~~
 
 flaskJSONRPCServer resides on **github**. You can file issues or pull
 requests `there <https://github.com/byaka/flaskJSONRPCServer/issues>`__.
 
 Requirements
-------------
+~~~~~~~~~~~~
 
 -  **Python2.6** or **Python2.7**
 -  **Flask** >= 0.10 (not tested with older version)
 -  **Gevent** >= 1.0 (optionally, but recommended)
 
 `How to install <#install>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 `Documentation <https://byaka.github.io/flaskJSONRPCServer-docs/>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-`About Gevent and async <#gevent-and-async>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-`About hot-reloading <#hot-reloading>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 `Simple example <#examples>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 `Licensing <#license>`__
-~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^
 
 Pros
-----
+~~~~
 
 -  Lib ready for **production**, we use it in some products
 -  Lib tested over **"highload"** (over 60 connections per second, 24/7
@@ -73,82 +67,21 @@ Pros
 -  Lib collects self **speed-stats**
 
 Cons
-----
+~~~~
 
--  Not fully **documentated**. For now only examples in package and `API documentation <https://byaka.github.io/flaskJSONRPCServer-docs/>`__.
+-  Not fully **documentated**. For now only examples in package and `API
+   documentation <https://byaka.github.io/flaskJSONRPCServer-docs/>`__.
 -  Lib not has **decorators**, so it not a "Flask-way" (this can be
    simply added, but i not use decorators, sorry)
+-  Lib not covered with **tests**.
 
 Install
--------
+~~~~~~~
 
 ``pip install flaskJSONRPCServer``
 
-Gevent and async
-----------------
-
-Some server’s methods (like JSON processing or compression) not
-supported greenlets switching while processing. It can be big
-performance problem on highload. I start to implement functionality to
-solve this. Please see `experimental
-package <https://github.com/byaka/flaskJSONRPCServer/blob/with_parallel_executing/flaskJSONRPCServer/experimental/README.md>`__.
-
-Hot-reloading
--------------
-
-You can overload source of server without stopping.
-
-.. code:: python
-
-    server.reload(data, clearOld=False)
-
-Flag ``<clearOld>`` will remove all earlier existing dispatchers.
-
-This operation safe, if something goes wrong, lib restore previous
-source. While reloading, server stop processing requests, but not reject
-them. Server handle all requests, and when reloading completed, all
-handled requests will be processed. It also wait for completing
-processing requests before start reloading and you can pass
-``<timeout>`` for this waiting. Also you can pass
-``<processingDispatcherCountMax>`` and server will not wait for given
-number of processed requests.
-
-When reloading, you can change source, merge new variables with old and
-many more.
-
-.. code:: python
-
-    data=[
-       {'dispatcher':'testForReload1', 'scriptPath':server._getScriptPath(True), 'isInstance':False,'overload':[{'globalVar1':globalVar1}, callbackForManualOverload], 'path':'/api'}
-    ]
-
-For now overloading supports for any dispatcher or several dispatchers
-separately (you can fully change all dispatcher's settings and of course
-source and variables).
-
-When you reload dispatcher and give path for file (of course it can be
-same file as "main"), this file imported. Then lib overloaded variables
-and attributes you give and replace old dispatcher with new from this
-module. If you give one path for several dispatchers, they all work in
-one imported file (in this case file will import one time only, not for
-every dispatcher).
-
-If you need to overload some objects, that not dispatchers but used in
-them, you simply can do this with callback.
-
-.. code:: python
-
-    def callbackForManualOverload(server, module, dispatcher):
-       # overload globals also
-       for k in dir(module):
-          globals()[k]=getattr(module, k)
-
-This code overload all global variables and replace them with variables
-from just imported file. In future i add simple method for reloading all
-source of server.
-
 Examples
---------
+~~~~~~~~
 
 Simple server. More examples you can find in directory *example/*
 
@@ -227,14 +160,16 @@ Simple server. More examples you can find in directory *example/*
        #    For example by http://127.0.0.1:7001/api/echo?data=test_data&jsonp=jsonpCallback_129620
 
 License
--------
+~~~~~~~
 
 It is licensed under the Apache License, Version 2.0
 (`read <http://www.apache.org/licenses/LICENSE-2.0.html>`__).
 
+.. |python27| image:: https://img.shields.io/badge/python-2.7-blue.svg
+   :target: https://github.com/byaka/flaskJSONRPCServer
+.. |License| image:: https://img.shields.io/pypi/l/flaskJSONRPCServer.svg
+   :target: http://www.apache.org/licenses/LICENSE-2.0.html
 .. |PyPI version| image:: https://img.shields.io/pypi/v/flaskJSONRPCServer.svg
    :target: https://pypi.python.org/pypi/flaskJSONRPCServer
 .. |PyPI downloads| image:: https://img.shields.io/pypi/dm/flaskJSONRPCServer.svg
    :target: https://pypi.python.org/pypi/flaskJSONRPCServer
-.. |License| image:: https://img.shields.io/pypi/l/flaskJSONRPCServer.svg
-   :target: http://www.apache.org/licenses/LICENSE-2.0.html

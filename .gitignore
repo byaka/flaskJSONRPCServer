@@ -3,3 +3,4 @@
 /.sphinx-build
 /.sphinx-release
 *.pyc
+/.command_for_convert_md_to_rst
