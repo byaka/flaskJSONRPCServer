@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import sys, time, random
+
 """
 This example show how to stop or restart server.
 This function fully safe, waits for completing old requests,
@@ -34,12 +35,15 @@ if __name__=='__main__':
    #    <tweakDescriptors> set descriptor's limit for server
    #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
    #    <notifBackend>     set backend for Notify-requests
-   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000])
+   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=3, fallback=True, allowCompress=False, jsonBackend='simplejson', dispatcherBackend='simple', notifBackend='simple', tweakDescriptors=[1000, 1000])
    # Register dispatchers for single functions
    server.registerFunction(echo, path='/api')
    server.registerFunction(restart, path='/api')
    # Run server
    server.start()
+   # Run cicle, where we check is "restart()" called
+   # if you want to use "time.sleep()" instead "server._sleep()" with gevent, call "server._importThreading(scope=globals())" or "server._importAll(scope=globals())"
+   if server.setts.gevent: server._importThreading(scope=globals())
    while True:
       time.sleep(5)
       if needRestart:
@@ -48,7 +52,7 @@ if __name__=='__main__':
          # <timeout> is how long (in seconds) we wait for compliting all existing requests
          # <processingDispatcherCountMax> not wait for some count of executing dispatchers
          server.stop(timeout=5, processingDispatcherCountMax=0) #stop server
-         time.sleep(3) #now server stopped, try to request it
+         time.sleep(5) #now server stopped, try to request it
          server.start() #start again
          # or you can use server.restart(timeout=5, processingDispatcherCountMax=0)
          print 'ok'

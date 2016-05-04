@@ -1,74 +1,51 @@
 # -*- coding: utf-8 -*-
 import sys, time, random, os
+
 """
 This example show how to reload API without restarting server.
 This function fully safe, waits for completing old requests,
 optionally has timeout and ability for overloading variables.
+
+This version show, how also overload globals().
 """
 
 from flaskJSONRPCServer import flaskJSONRPCServer
-
-# default dispatcher
-class mySharedMethods:
-   def __init__(self): self.data=[]
-
-   def compute(self):
-      if not len(self.data): s='No data'
-      else:
-         s=float(sum(self.data))/len(self.data)
-      return '"compute()" method from main module: %s'%s
 
 def stats(_connection=None):
    # return server's speed stats
    return _connection.server.stats(inMS=True) #inMS=True return stats in milliseconds
 
-# dispatcher for reloading, call him
-def reload(_connection=None):
-   global inst
-   path=os.path.dirname(os.path.realpath(sys.argv[0]))
-   # reloading really reloads module, so we need to overload variables
-   def tOverloadForClassInstance(server, module, dispatcher): dispatcher.data=inst.data
-   tArr1=[
-      {
-         'info':'reloadAndReplace.py',
-         'scriptPath':path+'/reloadAndReplace.py',
-         'dispatcher':'mySharedMethods',
-         'isInstance':True,
-         'overload': tOverloadForClassInstance,
-         'path':'/api' # don't forget about path
-      },
-      {
-         'info':'rr1.py',
-         'scriptPath':path+'/rr1.py',
-         'dispatcher':'compute',
-         'isInstance':False,
-         'overload': {'data':inst.data},
-         'path':'/api' # don't forget about path
-      },
-      {
-         'info':'lambda',
-         'dispatcher':lambda: 'dummy "compute()" method from runtime',
-         'dispatcherName':'compute',
-         'path':'/api' # don't forget about path
-      }
-   ]
-   # randomly choice new dispatcher
-   s=random.choice(tArr1)
-   print 'Reload api to "%s"..'%s['info']
-   # if <clearOld> = True, all existing dispatchers will be removed
-   # <timeout> is how long (in seconds) we wait for compliting all existing requests
-   _connection.server.reload(s, clearOld=False, timeout=3)
+def testFunc2(s):
+   # this function called from dispatchers
+   return 'From original: %s'%s
 
-# simply generate data for computing
-def genData(data):
-   for i in xrange(10000):
-      data.append(round(random.random()*10, 1))
+def testForReload1(_connection=None):
+   # this method can be reloaded with reloadApi()
+   s=42
+   return testFunc2(s)
+
+def testForReload2(_connection=None):
+   # this method not reloaded with reloadApi(), but call same function testFunc2()
+   s=42
+   return testFunc2(s)
+
+# dispatcher for reloading, call him
+def reloadApi(globally=False, _connection=None):
+   # callback for overloading globals
+   def callbackForManualOverload(server, module, dispatcher):
+      if not globally: return
+      # overload globals also
+      for k in dir(module):
+         globals()[k]=getattr(module, k)
+   # what we want to reload
+   data=[
+      {'dispatcher':'testForReload1', 'scriptPath':_connection.server._getScriptPath(True), 'isInstance':False,'overload':[{}, callbackForManualOverload], 'path':'/api'}
+   ]
+   # <clearOld>   if True, all existing dispatchers will be removed
+   # <timeout>    is how long (in seconds) we wait for compliting all existing requests
+   _connection.server.reload(data, clearOld=False)
 
 if __name__=='__main__':
-   # generate random data
-   global inst
-   inst=mySharedMethods()
-   genData(inst.data)
    print 'Running api..'
    # Creating instance of server
    #    <blocking>         switch server to sync mode when <gevent> is False
@@ -83,11 +60,11 @@ if __name__=='__main__':
    #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
    #    <notifBackend>     set backend for Notify-requests
    server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000])
-   # Register dispatcher for all methods of instance
-   server.registerInstance(inst, path='/api')
    # Register dispatchers for single functions
    server.registerFunction(stats, path='/api')
-   server.registerFunction(reload, path='/api')
+   server.registerFunction(reloadApi, path='/api')
+   server.registerFunction(testForReload1, path='/api')
+   server.registerFunction(testForReload2, path='/api')
    # Run server
    server.serveForever()
    # Now you can access this api by path http://127.0.0.1:7001/api for JSON-RPC requests

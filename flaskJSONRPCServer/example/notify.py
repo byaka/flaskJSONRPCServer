@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import sys, time, random
+
 """
 This example show how to use notify backend for fully support "Notify-requests" (without id).
 Without it client must wait for completing processing of request.
@@ -15,7 +16,7 @@ class mySharedMethods:
 
 def block(_connection):
    # Test for notification request. When it fully implemented, client must  not wait for compliting this function
-   _connection.sleepMethod(2) #this contain time.sleep() patched if needed and always safely
+   _connection.call.sleep(2) #this contain time.sleep() patched if needed and always safely
    time.sleep(2) #but in common cases this work too
    # or you can auto patch your scope
    # _connection.server._importThreading(scope=globals())
@@ -39,7 +40,7 @@ if __name__=='__main__':
    #    <tweakDescriptors> set descriptor's limit for server
    #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
    #    <notifBackend>     set backend for Notify-requests
-   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', notifBackend='threadPool', tweakDescriptors=[1000, 1000])
+   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', notifBackend='threadPoolNative', tweakDescriptors=[1000, 1000])
    # Register dispatcher for all methods of instance
    server.registerInstance(mySharedMethods(), path='/api')
    # Register dispatchers for single functions

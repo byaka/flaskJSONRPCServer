@@ -1,42 +1,55 @@
+[![python27](https://img.shields.io/badge/python-2.7-blue.svg)](https://github.com/byaka/flaskJSONRPCServer)
+[![License](https://img.shields.io/pypi/l/flaskJSONRPCServer.svg)](http://www.apache.org/licenses/LICENSE-2.0.html)
 [![PyPI version](https://img.shields.io/pypi/v/flaskJSONRPCServer.svg)](https://pypi.python.org/pypi/flaskJSONRPCServer)
 [![PyPI downloads](https://img.shields.io/pypi/dm/flaskJSONRPCServer.svg)](https://pypi.python.org/pypi/flaskJSONRPCServer)
-[![License](https://img.shields.io/pypi/l/flaskJSONRPCServer.svg)](http://www.apache.org/licenses/LICENSE-2.0.html)
+
 
 # flaskJSONRPCServer
-This library is an implementation of the JSON-RPC specification. It supports only 2.0 specification for now, which includes batch submission, keyword arguments, etc.
+This library is an extended implementation of server for JSON-RPC protocol. It supports only json-rpc 2.0 specification for now, which includes batch submission, keyword arguments, notifications, etc.
 
-## Comments, bug reports
+### Comments, bug reports
 flaskJSONRPCServer resides on **github**. You can file issues or pull requests [there](https://github.com/byaka/flaskJSONRPCServer/issues).
 
-## Requirements
- - Python >=2.6
- - Flask >= 0.10 (not tested with older version)
- - Gevent >= 1.0 (optionally)
+### Requirements
+ - **Python2.6** or **Python2.7**
+ - **Flask** >= 0.10 (not tested with older version)
+ - **Gevent** >= 1.0 (optionally, but recommended)
 
-## Pros
+####[How to install](#install)
+####[Documentation](https://byaka.github.io/flaskJSONRPCServer-docs/)
+####[Simple example](#examples)
+####[Licensing](#license)
 
- - Lib tested over **highload** (>=60 connections per second, 24/7 and it's not simulation) with **Gevent** enabled and no stability issues or memory leak (this is why i'm wrote this library)
+### Pros
+ - Lib ready for **production**, we use it in some products
+ - Lib tested over **"highload"** (over 60 connections per second, 24/7 and it's not simulation) with **Gevent** enabled and no stability issues or memory leak (this is why i'm wrote this library)
  - Auto **CORS**
  - Simple switching to **Gevent** as backend
  - Auto fallback to **JSONP** on GET requests (for old browsers, that don't support CORS like **IE**<10)
  - Dispatchers can simply get info about connection (**IP**, **Cookies**, **Headers**)
  - Dispatchers can simply set **Cookies**, change output **Headers**, change output format for **JSONP** requests
- - Lib can be simply integrated with another **Flask** app on the same IP:PORT
- - Lib fully support **Notification** requests (see example/notify.py)
- - Lib supports **restarting** server (see example/restart.py)
- - Lib supports **hot reloading** of API (see example/reloadAndReplace.py)
- - Lib supports **multiple servers** in one app (see example/multiple.py)
- - Lib supports **merging** with another WSGI app (see example/mergeFlaskApp.py)
+ - Lib fully support **Notification** requests (see _example/notify.py_)
+ - Lib supports **restarting** server (see _example/restart.py_)
+ - Lib supports **hot-reloading** of API (see _example/hotReload1.py_, _example/hotReload2.py_)
+ - Lib supports **multiple servers** in one app (see _example/multiple.py_)
+ - Lib supports **merging** with another WSGI app on the same IP:PORT (see _example/mergeFlaskApp.py_)
+ - Lib supports different **execution-backends**, for example multiprocessing (see _example/parallelExecuting.py_)
+ - Lib supports **locking** (you can lock all server or specific dispatchers)
+ - Lib supports different **serializing-backends** so you can implement any protocol, not only JSON
+ - Lib supports **individual settings** for different dispatchers. For example one of them can be processed with parallel (multiprocess) backend, other with standard processing
+ - Lib collects self **speed-stats**
 
-## Cons
- - No **documentation**, only examples in package (sorry, i not have time for now)
+### Cons
+ - Not fully **documentated**. For now only examples in package and [API documentation](https://byaka.github.io/flaskJSONRPCServer-docs/).
  - Lib not has **decorators**, so it not a "Flask-way" (this can be simply added, but i not use decorators, sorry)
+ - Lib not covered with **tests**.
 
-## Install
+### Install
 ```pip install flaskJSONRPCServer```
 
-## Examples
-Simple server
+### Examples
+Simple server. More examples you can find in directory _example/_
+
 ```python
 import sys, time, random
 from flaskJSONRPCServer import flaskJSONRPCServer
@@ -112,5 +125,5 @@ if __name__=='__main__':
 
 ```
 
-## License
+### License
 It is licensed under the Apache License, Version 2.0 ([read](http://www.apache.org/licenses/LICENSE-2.0.html)).

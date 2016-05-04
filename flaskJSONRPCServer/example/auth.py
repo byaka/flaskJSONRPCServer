@@ -1,24 +1,23 @@
 # -*- coding: utf-8 -*-
 import sys, time, random
 
-#FLASK
-from flask import Flask
-
 from flaskJSONRPCServer import flaskJSONRPCServer
 
-def echo(data='Hello world!'):
-   # Simply echo
-   return data
-echo._alias='helloworld' #setting alias for method
+def hiGuest(_connection=None):
+   return 'Hello, %s!'%(_connection.ip)
 
-def stats(_connection=None):
-   #return server's speed stats
-   return _connection.server.stats(inMS=True) #inMS=True return stats in milliseconds
+def hiUser(_connection=None):
+   return 'Hello, USER!'
 
-app=Flask(__name__)
-@app.route('/helloworld', methods=['GET'])
-def flaskHelloworld():
-   return 'Hello world!'
+def auth(server, path, request, jsonpMethod):
+   # <server>        is a flaskJSONRPCServer instance
+   # <path>          is a PATH of request
+   # <request>       is a copy of REQUEST object
+   # <jsonpMethod>   is a dispatcher's name, if request sended over JSONP (GET)
+   print 'AUTH_CB', path, request.headers, request.environ.get('HTTP_X_REAL_IP', request.remote_addr)
+   if path=='/api/': return True
+   if request.headers.get('Token', None)=='1234': return True
+   if request.environ.get('HTTP_X_REAL_IP', request.remote_addr)=='127.0.0.1': return True
 
 if __name__=='__main__':
    print 'Running api..'
@@ -34,13 +33,11 @@ if __name__=='__main__':
    #    <tweakDescriptors> set descriptor's limit for server
    #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
    #    <notifBackend>     set backend for Notify-requests
-   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000])
+   #    <auth>             set callback for authorization
+   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000], auth=auth)
    # Register dispatchers for single functions
-   server.registerFunction(echo, path='/api')
-   server.registerFunction(stats, path='/api')
-   # merge with Flask app
-   server.flaskApp=app
-   server.flaskAppName=__name__
+   server.registerFunction(hiUser, path='/apiAuth', name='hi')
+   server.registerFunction(hiGuest, path='/api', name='hi')
    # Run server
    server.serveForever()
    # Now you can access this api by path http://127.0.0.1:7001/api for JSON-RPC requests

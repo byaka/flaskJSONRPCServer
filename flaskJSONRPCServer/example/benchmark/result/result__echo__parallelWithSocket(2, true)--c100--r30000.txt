@@ -1,0 +1,67 @@
+Concurrency Level:      100
+Time taken for tests:   84.285 seconds
+Complete requests:      30000
+Failed requests:        0
+Write errors:           0
+Total transferred:      11430000 bytes
+Total body sent:        6480000
+HTML transferred:       1560000 bytes
+Requests per second:    355.93 [#/sec] (mean)
+Time per request:       280.950 [ms] (mean)
+Time per request:       2.810 [ms] (mean, across all concurrent requests)
+Transfer rate:          132.43 [Kbytes/sec] received
+                        75.08 kb/s sent
+                        207.51 kb/s total
+
+Connection Times (ms)
+              min  mean[+/-sd] median   max
+Connect:        0    0   0.1      0       3
+Processing:   103  280  49.6    314     424
+Waiting:      103  280  49.6    314     424
+Total:        106  280  49.6    314     424
+
+Percentage of the requests served within a certain time (ms)
+  50%    314
+  66%    316
+  75%    318
+  80%    319
+  90%    321
+  95%    324
+  98%    327
+  99%    330
+ 100%    424 (longest request)
+
+------------------------------------------------------------------------------
+
+Concurrency Level:      100
+Time taken for tests:   82.376 seconds
+Complete requests:      30000
+Failed requests:        0
+Write errors:           0
+Total transferred:      11430000 bytes
+Total body sent:        6480000
+HTML transferred:       1560000 bytes
+Requests per second:    364.19 [#/sec] (mean)
+Time per request:       274.586 [ms] (mean)
+Time per request:       2.746 [ms] (mean, across all concurrent requests)
+Transfer rate:          135.50 [Kbytes/sec] received
+                        76.82 kb/s sent
+                        212.32 kb/s total
+
+Connection Times (ms)
+              min  mean[+/-sd] median   max
+Connect:        0    0   0.1      0       3
+Processing:   105  274  50.4    312     416
+Waiting:      105  274  50.4    312     416
+Total:        107  274  50.4    312     416
+
+Percentage of the requests served within a certain time (ms)
+  50%    312
+  66%    315
+  75%    316
+  80%    317
+  90%    320
+  95%    322
+  98%    326
+  99%    330
+ 100%    416 (longest request)

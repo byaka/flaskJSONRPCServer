@@ -1,0 +1,67 @@
+Concurrency Level:      100
+Time taken for tests:   19.067 seconds
+Complete requests:      30000
+Failed requests:        0
+Write errors:           0
+Total transferred:      11430000 bytes
+Total body sent:        6480000
+HTML transferred:       1560000 bytes
+Requests per second:    1573.38 [#/sec] (mean)
+Time per request:       63.558 [ms] (mean)
+Time per request:       0.636 [ms] (mean, across all concurrent requests)
+Transfer rate:          585.41 [Kbytes/sec] received
+                        331.88 kb/s sent
+                        917.29 kb/s total
+
+Connection Times (ms)
+              min  mean[+/-sd] median   max
+Connect:        0    0   0.2      0       5
+Processing:     5   63   2.1     63      73
+Waiting:        5   63   2.1     63      73
+Total:         10   63   1.9     63      75
+
+Percentage of the requests served within a certain time (ms)
+  50%     63
+  66%     63
+  75%     64
+  80%     65
+  90%     66
+  95%     66
+  98%     67
+  99%     67
+ 100%     75 (longest request)
+
+-------------------------------------------------------------------------------
+
+Concurrency Level:      100
+Time taken for tests:   19.002 seconds
+Complete requests:      30000
+Failed requests:        0
+Write errors:           0
+Total transferred:      11430000 bytes
+Total body sent:        6480000
+HTML transferred:       1560000 bytes
+Requests per second:    1578.77 [#/sec] (mean)
+Time per request:       63.340 [ms] (mean)
+Time per request:       0.633 [ms] (mean, across all concurrent requests)
+Transfer rate:          587.41 [Kbytes/sec] received
+                        333.02 kb/s sent
+                        920.44 kb/s total
+
+Connection Times (ms)
+              min  mean[+/-sd] median   max
+Connect:        0    0   0.2      0       5
+Processing:     5   63   2.1     63      72
+Waiting:        4   63   2.1     63      72
+Total:         10   63   2.0     63      74
+
+Percentage of the requests served within a certain time (ms)
+  50%     63
+  66%     63
+  75%     64
+  80%     64
+  90%     65
+  95%     66
+  98%     67
+  99%     68
+ 100%     74 (longest request)
