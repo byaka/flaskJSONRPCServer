@@ -1,3 +1,9 @@
-include README.md README.rst LICENSE flaskJSONRPCServer/example/*
-exclude *.pyc
+include README.md
+include README.rst
+include LICENSE
+include flaskJSONRPCServer/*
+include flaskJSONRPCServer/example/*
 
+# Patterns to exclude from any directory
+global-exclude *.pyc
+global-exclude *.pyo

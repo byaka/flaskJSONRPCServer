@@ -109,7 +109,7 @@ if __name__=='__main__':
    #    <tweakDescriptors> set descriptor's limit for server
    #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
    #    <notifBackend>     set backend for Notify-requests
-   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, compressMinSize=1024, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000])
+   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=False, debug=False, log=3, fallback=True, allowCompress=False, compressMinSize=1024, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000])
    # Register dispatcher for all methods of instance
    server.registerInstance(mySharedMethods(), path='/api')
    # same name, but another path
