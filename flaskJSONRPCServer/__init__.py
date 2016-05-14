@@ -34,8 +34,8 @@ Flask=None
 request=None
 Response=None
 gevent=None
+geventMonkey=None
 
-# from utils import UnixHTTPConnection, magicDict, virtVar
 from utils import magicDict, virtVar
 
 import execBackend as execBackendCollection
@@ -43,7 +43,8 @@ import execBackend as execBackendCollection
 try:
    import experimental as experimentalPack
    experimentalPack.initGlobal(globals())
-except ImportError, e: print 'EXPERIMENTAL package not loaded:', e
+except ImportError, e:
+   print 'EXPERIMENTAL package not loaded:', e
 
 class flaskJSONRPCServer:
    """
@@ -295,7 +296,8 @@ class flaskJSONRPCServer:
          'httplib':None,
          'urllib2':None,
          'socket':['patch_socket', {'dns':True, 'aggressive':True}],
-         'ssl':'patch_ssl'
+         'ssl':'patch_ssl',
+         'select':['patch_select', {'aggressive':True}]
       }
       return self._import(modules, scope=scope, forceDelete=forceDelete)
 
@@ -597,18 +599,6 @@ class flaskJSONRPCServer:
          else:
             t=gevent.spawn(target, *args, **kwargs)
       return t
-      # if forceNative and self.settings.gevent: #force using NATIVE python threads, insted of coroutines
-      #    import gevent
-      #    if hasattr(gevent, '_threading'):
-      #       t=gevent._threading.start_new_thread(target, tuple(args or []), kwargs or {})
-      #    else:
-      #       t=threading.Thread(target=target, args=args or [], kwargs=kwargs or {})
-      #       t.start()
-      # else:
-      #    self._importThreading(forceDelete=True)
-      #    t=threading.Thread(target=target, args=args or [], kwargs=kwargs or {})
-      #    t.start()
-      # return t
 
    def _sleep(self, s, forceNative=False):
       """
@@ -626,18 +616,6 @@ class flaskJSONRPCServer:
          else:
             _sleep=gevent.sleep
       _sleep(s)
-      # if self.settings.gevent and not forceNative:
-      #    import gevent
-      #    _sleep=gevent.sleep
-      # else:
-      #    try:
-      #       from gevent import monkey
-      #       _sleep=monkey.get_original('time', 'sleep')
-      #    except Exception, e:
-      #       print '!!!', e
-      #       self._importThreading(forceDelete=True)
-      #       _sleep=time.sleep
-      # _sleep(s)
 
    def _getScriptPath(self, full=False, real=True):
       """
@@ -1646,6 +1624,8 @@ class flaskJSONRPCServer:
             dataIn={'method':method, 'params':params}
             # generate unique id
             uniqueId='--'.join([dataIn['method'], str(random.randint(0, 999999)), str(random.randint(0, 999999)), str(request.environ.get('HTTP_X_REAL_IP', request.remote_addr) or ''), self._sha1(request.get_data()), str(self._getms())])
+            # <id> passed like for normal request
+            dataIn={'method':method, 'params':params, 'id':uniqueId}
             # select dispatcher
             dispatcher=self.routes[path][dataIn['method']]
             # copy request's context
@@ -1768,13 +1748,14 @@ class flaskJSONRPCServer:
          self._logger(3, 'Server running as gevent..')
          # check what patches supports installed gevent version
          monkeyPatchSupported, _, _, _=inspect.getargspec(geventMonkey.patch_all)
-         monkeyPatchArgs_default={'socket':False, 'dns':False, 'time':False, 'select':True, 'thread':False, 'os':True, 'ssl':False, 'httplib':False, 'subprocess':True, 'sys':False, 'aggressive':True, 'Event':False, 'builtins':True, 'signal':True}
+         monkeyPatchArgs_default={'socket':False, 'dns':False, 'time':False, 'select':False, 'thread':False, 'os':True, 'ssl':False, 'httplib':False, 'subprocess':True, 'sys':False, 'aggressive':True, 'Event':False, 'builtins':True, 'signal':True}
          monkeyPatchArgs={}
          for k, v in monkeyPatchArgs_default.items():
             if k in monkeyPatchSupported: monkeyPatchArgs[k]=v
          # monkey patching
          geventMonkey.patch_all(**monkeyPatchArgs)
          self._importAll(forceDelete=True, scope=globals())
+         # create server
          from gevent.pywsgi import WSGIServer
          from gevent.pool import Pool
          if self.setts.ssl: from gevent import ssl

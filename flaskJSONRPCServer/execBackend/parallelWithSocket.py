@@ -33,6 +33,7 @@ class execBackend:
    :param bool saveResult:
    :param bool persistent_queueGet:
    :param bool useCPickle:
+   :param bool disableGeventInChild:
    """
 
    def __init__(self, poolSize=1, importGlobalsFromParent=True, parentGlobals=None, sleepTime_resultCheck=0.1, sleepTime_emptyQueue=0.1, sleepTime_waitLock=0.75, sleepTime_lazyRequest=2*60*1000, sleepTime_checkPoolStopping=0.3, allowThreads=True, id='execBackend_parallelWithSocket', socketPath=None, saveResult=True, persistent_queueGet=True, useCPickle=False, disableGeventInChild=False):
@@ -115,7 +116,7 @@ class execBackend:
          # create listener
          l=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
          l.bind(lPath)
-         l.listen(1)
+         l.listen(1) #! выставлять корректное значение, посмотреть как сделано в pywsgi
          listeners[i]=(lPath, l)
       # link to parentServer
       self._parentServer=server
