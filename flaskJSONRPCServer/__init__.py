@@ -3,7 +3,7 @@
 
 __ver_major__ = 0
 __ver_minor__ = 9
-__ver_patch__ = 1
+__ver_patch__ = 2
 __ver_sub__ = ""
 __version__ = "%d.%d.%d" % (__ver_major__, __ver_minor__, __ver_patch__)
 """
@@ -36,7 +36,7 @@ Response=None
 gevent=None
 geventMonkey=None
 
-from utils import magicDict, virtVar
+from utils import magicDict, virtVar, deque2
 
 import execBackend as execBackendCollection
 
@@ -142,7 +142,11 @@ class flaskJSONRPCServer:
       # prepare speedStats
       self.speedStats={}
       self.speedStatsMax={}
-      self.connPerMinute=magicDict({'nowMinute':0, 'count':0, 'oldCount':0, 'maxCount':0, 'minCount':0})
+      self.connPerMinute=magicDict({
+         'nowMinute':0, 'count':0, 'oldCount':0, 'maxCount':0, 'minCount':0,
+         'history1':deque2([], 9999),
+         'history2':{'minute':deque2([], 9999), 'count':deque2([], 9999)}
+      })
       # register URLs
       self._registerServerUrl(dict([[s, self._requestHandler] for s in self.pathsDef]))
       # select JSON-backend
@@ -747,7 +751,6 @@ class flaskJSONRPCServer:
       vals=val if self._isArray(val) else [val]
       if len(names)!=len(vals):
          self._throw('Wrong length')
-      mytime=self._getms()
       for i, name in enumerate(names):
          val=vals[i]
          if name not in self.speedStats: self.speedStats[name]=[]
@@ -1470,6 +1473,20 @@ class flaskJSONRPCServer:
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       self.processingRequestCount+=1
       self._gcStats.processedRequestCount+=1
+      # calculate connections per second
+      nowMinute=int(time.time())/60
+      #! добавить ведение истории в двух вариантах (self.connPerMinute.history1 и self.connPerMinute.history2) и сравнить их производительность
+      if nowMinute!=self.connPerMinute.nowMinute:
+         self.connPerMinute.nowMinute=nowMinute
+         if self.connPerMinute.count:
+            self.connPerMinute.oldCount=self.connPerMinute.count
+         if self.connPerMinute.count>self.connPerMinute.maxCount:
+            self.connPerMinute.maxCount=self.connPerMinute.count
+         if self.connPerMinute.count<self.connPerMinute.minCount or not self.connPerMinute.minCount:
+            self.connPerMinute.minCount=self.connPerMinute.count
+         self.connPerMinute.count=0
+      self.connPerMinute.count+=1
+      # processing request
       try:
          res=self._requestProcess(path, method)
          if self.settings.controlGC: self._controlGC() # call GC manually
@@ -1493,18 +1510,6 @@ class flaskJSONRPCServer:
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       # DeepLock
       self._deepWait()
-      # calculate connections per second
-      nowMinute=int(time.time())/60
-      if nowMinute!=self.connPerMinute.nowMinute:
-         self.connPerMinute.nowMinute=nowMinute
-         if self.connPerMinute.count:
-            self.connPerMinute.oldCount=self.connPerMinute.count
-         if self.connPerMinute.count>self.connPerMinute.maxCount:
-            self.connPerMinute.maxCount=self.connPerMinute.count
-         if self.connPerMinute.count<self.connPerMinute.minCount or not self.connPerMinute.minCount:
-            self.connPerMinute.minCount=self.connPerMinute.count
-         self.connPerMinute.count=0
-      self.connPerMinute.count+=1
       path=self._formatPath(path)
       if path not in self.routes:
          self._logger(2, 'UNKNOWN_PATH:', path)
@@ -1756,7 +1761,10 @@ class flaskJSONRPCServer:
          geventMonkey.patch_all(**monkeyPatchArgs)
          self._importAll(forceDelete=True, scope=globals())
          # create server
-         from gevent.pywsgi import WSGIServer
+         try:
+            from gevent.pywsgi import WSGIServer
+         except ImportError:
+            self._throw('You switch server to GEVENT mode, but gevent not founded. For switching to DEV mode (without GEVENT) please pass <gevent>=False to constructor')
          from gevent.pool import Pool
          if self.setts.ssl: from gevent import ssl
          self._serverPool=[]
