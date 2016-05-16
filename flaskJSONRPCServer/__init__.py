@@ -3,7 +3,7 @@
 
 __ver_major__ = 0
 __ver_minor__ = 9
-__ver_patch__ = 1
+__ver_patch__ = 2
 __ver_sub__ = ""
 __version__ = "%d.%d.%d" % (__ver_major__, __ver_minor__, __ver_patch__)
 """
@@ -34,16 +34,17 @@ Flask=None
 request=None
 Response=None
 gevent=None
+geventMonkey=None
 
-# from utils import UnixHTTPConnection, magicDict, virtVar
-from utils import magicDict, virtVar
+from utils import magicDict, virtVar, deque2
 
 import execBackend as execBackendCollection
 
 try:
    import experimental as experimentalPack
    experimentalPack.initGlobal(globals())
-except ImportError, e: print 'EXPERIMENTAL package not loaded:', e
+except ImportError, e:
+   print 'EXPERIMENTAL package not loaded:', e
 
 class flaskJSONRPCServer:
    """
@@ -141,7 +142,11 @@ class flaskJSONRPCServer:
       # prepare speedStats
       self.speedStats={}
       self.speedStatsMax={}
-      self.connPerMinute=magicDict({'nowMinute':0, 'count':0, 'oldCount':0, 'maxCount':0, 'minCount':0})
+      self.connPerMinute=magicDict({
+         'nowMinute':0, 'count':0, 'oldCount':0, 'maxCount':0, 'minCount':0,
+         'history1':deque2([], 9999),
+         'history2':{'minute':deque2([], 9999), 'count':deque2([], 9999)}
+      })
       # register URLs
       self._registerServerUrl(dict([[s, self._requestHandler] for s in self.pathsDef]))
       # select JSON-backend
@@ -295,7 +300,8 @@ class flaskJSONRPCServer:
          'httplib':None,
          'urllib2':None,
          'socket':['patch_socket', {'dns':True, 'aggressive':True}],
-         'ssl':'patch_ssl'
+         'ssl':'patch_ssl',
+         'select':['patch_select', {'aggressive':True}]
       }
       return self._import(modules, scope=scope, forceDelete=forceDelete)
 
@@ -597,18 +603,6 @@ class flaskJSONRPCServer:
          else:
             t=gevent.spawn(target, *args, **kwargs)
       return t
-      # if forceNative and self.settings.gevent: #force using NATIVE python threads, insted of coroutines
-      #    import gevent
-      #    if hasattr(gevent, '_threading'):
-      #       t=gevent._threading.start_new_thread(target, tuple(args or []), kwargs or {})
-      #    else:
-      #       t=threading.Thread(target=target, args=args or [], kwargs=kwargs or {})
-      #       t.start()
-      # else:
-      #    self._importThreading(forceDelete=True)
-      #    t=threading.Thread(target=target, args=args or [], kwargs=kwargs or {})
-      #    t.start()
-      # return t
 
    def _sleep(self, s, forceNative=False):
       """
@@ -626,18 +620,6 @@ class flaskJSONRPCServer:
          else:
             _sleep=gevent.sleep
       _sleep(s)
-      # if self.settings.gevent and not forceNative:
-      #    import gevent
-      #    _sleep=gevent.sleep
-      # else:
-      #    try:
-      #       from gevent import monkey
-      #       _sleep=monkey.get_original('time', 'sleep')
-      #    except Exception, e:
-      #       print '!!!', e
-      #       self._importThreading(forceDelete=True)
-      #       _sleep=time.sleep
-      # _sleep(s)
 
    def _getScriptPath(self, full=False, real=True):
       """
@@ -769,7 +751,6 @@ class flaskJSONRPCServer:
       vals=val if self._isArray(val) else [val]
       if len(names)!=len(vals):
          self._throw('Wrong length')
-      mytime=self._getms()
       for i, name in enumerate(names):
          val=vals[i]
          if name not in self.speedStats: self.speedStats[name]=[]
@@ -1492,6 +1473,20 @@ class flaskJSONRPCServer:
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       self.processingRequestCount+=1
       self._gcStats.processedRequestCount+=1
+      # calculate connections per second
+      nowMinute=int(time.time())/60
+      #! добавить ведение истории в двух вариантах (self.connPerMinute.history1 и self.connPerMinute.history2) и сравнить их производительность
+      if nowMinute!=self.connPerMinute.nowMinute:
+         self.connPerMinute.nowMinute=nowMinute
+         if self.connPerMinute.count:
+            self.connPerMinute.oldCount=self.connPerMinute.count
+         if self.connPerMinute.count>self.connPerMinute.maxCount:
+            self.connPerMinute.maxCount=self.connPerMinute.count
+         if self.connPerMinute.count<self.connPerMinute.minCount or not self.connPerMinute.minCount:
+            self.connPerMinute.minCount=self.connPerMinute.count
+         self.connPerMinute.count=0
+      self.connPerMinute.count+=1
+      # processing request
       try:
          res=self._requestProcess(path, method)
          if self.settings.controlGC: self._controlGC() # call GC manually
@@ -1515,18 +1510,6 @@ class flaskJSONRPCServer:
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       # DeepLock
       self._deepWait()
-      # calculate connections per second
-      nowMinute=int(time.time())/60
-      if nowMinute!=self.connPerMinute.nowMinute:
-         self.connPerMinute.nowMinute=nowMinute
-         if self.connPerMinute.count:
-            self.connPerMinute.oldCount=self.connPerMinute.count
-         if self.connPerMinute.count>self.connPerMinute.maxCount:
-            self.connPerMinute.maxCount=self.connPerMinute.count
-         if self.connPerMinute.count<self.connPerMinute.minCount or not self.connPerMinute.minCount:
-            self.connPerMinute.minCount=self.connPerMinute.count
-         self.connPerMinute.count=0
-      self.connPerMinute.count+=1
       path=self._formatPath(path)
       if path not in self.routes:
          self._logger(2, 'UNKNOWN_PATH:', path)
@@ -1646,6 +1629,8 @@ class flaskJSONRPCServer:
             dataIn={'method':method, 'params':params}
             # generate unique id
             uniqueId='--'.join([dataIn['method'], str(random.randint(0, 999999)), str(random.randint(0, 999999)), str(request.environ.get('HTTP_X_REAL_IP', request.remote_addr) or ''), self._sha1(request.get_data()), str(self._getms())])
+            # <id> passed like for normal request
+            dataIn={'method':method, 'params':params, 'id':uniqueId}
             # select dispatcher
             dispatcher=self.routes[path][dataIn['method']]
             # copy request's context
@@ -1768,14 +1753,18 @@ class flaskJSONRPCServer:
          self._logger(3, 'Server running as gevent..')
          # check what patches supports installed gevent version
          monkeyPatchSupported, _, _, _=inspect.getargspec(geventMonkey.patch_all)
-         monkeyPatchArgs_default={'socket':False, 'dns':False, 'time':False, 'select':True, 'thread':False, 'os':True, 'ssl':False, 'httplib':False, 'subprocess':True, 'sys':False, 'aggressive':True, 'Event':False, 'builtins':True, 'signal':True}
+         monkeyPatchArgs_default={'socket':False, 'dns':False, 'time':False, 'select':False, 'thread':False, 'os':True, 'ssl':False, 'httplib':False, 'subprocess':True, 'sys':False, 'aggressive':True, 'Event':False, 'builtins':True, 'signal':True}
          monkeyPatchArgs={}
          for k, v in monkeyPatchArgs_default.items():
             if k in monkeyPatchSupported: monkeyPatchArgs[k]=v
          # monkey patching
          geventMonkey.patch_all(**monkeyPatchArgs)
          self._importAll(forceDelete=True, scope=globals())
-         from gevent.pywsgi import WSGIServer
+         # create server
+         try:
+            from gevent.pywsgi import WSGIServer
+         except ImportError:
+            self._throw('You switch server to GEVENT mode, but gevent not founded. For switching to DEV mode (without GEVENT) please pass <gevent>=False to constructor')
          from gevent.pool import Pool
          if self.setts.ssl: from gevent import ssl
          self._serverPool=[]

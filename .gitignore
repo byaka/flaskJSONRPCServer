@@ -1,6 +1,4 @@
-/.command_for_build_sphinx
 /.command_for_upload_to_PyPi
-/.sphinx-build
-/.sphinx-release
-*.pyc
 /.command_for_convert_md_to_rst
+*.pyc
+/tmp

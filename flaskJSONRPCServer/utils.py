@@ -4,6 +4,21 @@
 import httplib
 from virtVar import virtVar
 import gmultiprocessing
+import collections
+
+class deque2(collections.deque):
+   """
+   This class add support of <maxlen> for old deque in python2.6.
+   Thx to Muhammad Alkarouri.
+   http://stackoverflow.com/a/4020363
+   """
+   def __init__(self, iterable=(), maxlen=None):
+      collections.deque.__init__(self, iterable, maxlen)
+      self._maxlen=maxlen
+
+   @property
+   def maxlen(self):
+      return self._maxlen
 
 class UnixHTTPConnection(httplib.HTTPConnection):
    """
