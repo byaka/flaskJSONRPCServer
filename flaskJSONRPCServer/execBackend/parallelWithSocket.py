@@ -7,12 +7,14 @@ This module contains dispatcher-execution backend for flaskJSONRPCServer.
 
 if __name__=='__main__':
    import sys, os
+   from collections import deque
    sys.path.append(os.path.dirname(os.path.realpath(sys.argv[0]))+'/..')
    from __init__ import flaskJSONRPCServer, experimentalPack
-   from utils import magicDict, UnixHTTPConnection
+   from utils import magicDict, UnixHTTPConnection, virtVar
    from types import InstanceType, IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, ModuleType, FunctionType
 else:
    import sys, os
+   from collections import deque
    from ..__init__ import flaskJSONRPCServer, experimentalPack
    from ..utils import magicDict, UnixHTTPConnection, virtVar
    from types import InstanceType, IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, ModuleType, FunctionType
@@ -55,7 +57,6 @@ class execBackend:
          'importGlobalsFromParent_typeForVarCheck':[IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, DictType, ListType, TupleType],
          'mergeGlobalsToParent_typeForEval':'[IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, TupleType]'
       })
-      from collections import deque
       self.parentGlobals=parentGlobals or {}
       self.queue=deque()
       self._pool=[]
@@ -116,7 +117,7 @@ class execBackend:
          # create listener
          l=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
          l.bind(lPath)
-         l.listen(1) #! выставлять корректное значение, посмотреть как сделано в pywsgi
+         l.listen(256)
          listeners[i]=(lPath, l)
       # link to parentServer
       self._parentServer=server
