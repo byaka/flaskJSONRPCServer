@@ -578,7 +578,7 @@ class flaskJSONRPCServer:
 
    def _thread(self, target, args=None, kwargs=None, forceNative=False):
       """
-      This method is wrapper above threading.Thread() or gevent.spawn(). Method swithing automatically, if <forceNative> is False. If it's True, always use unpatched threading.Thread().
+      This method is wrapper above threading.Thread() or gevent.spawn(). Method swithing automatically, if <forceNative> is False. If it's True, always use unpatched threading.Thread(). Spawned threads always will be started like daemons.
 
       :param func target:
       :param bool forceNative:
@@ -587,6 +587,7 @@ class flaskJSONRPCServer:
       kwargs=kwargs or {}
       if not self.settings.gevent:
          t=threading.Thread(target=target, args=args, kwargs=kwargs)
+         t.daemon=True
          t.start()
       else:
          self._tryGevent()
@@ -1668,8 +1669,10 @@ class flaskJSONRPCServer:
       resp=Response(response=dataOut, status=200, mimetype=mimeType)
       for hk, hv in outHeaders.items(): resp.headers[hk]=hv
       for c in outCookies:
-         try: resp.set_cookie(c.get('name', ''), c.get('value', ''), expires=c.get('expires', 2147483647), domain=c.get('domain', '*'))
-         except: resp.set_cookie(c.get('name', ''), c.get('value', ''), expires=c.get('expires', 2147483647))
+         try:
+            resp.set_cookie(c.get('name', ''), c.get('value', ''), expires=c.get('expires', 2147483647), domain=c.get('domain', '*'))
+         except:
+            resp.set_cookie(c.get('name', ''), c.get('value', ''), expires=c.get('expires', 2147483647))
       self._logger(4, 'GENERATE_TIME:', round(self._getms()-mytime, 1))
       self._speedStatsAdd('generateResponse', self._getms()-mytime)
       if resp.status_code!=200 or len(resp.data)<self.setts.compressMinSize or not allowCompress or 'gzip' not in request.headers.get('Accept-Encoding', '').lower():
@@ -1704,16 +1707,18 @@ class flaskJSONRPCServer:
          if restartOn:
             restartOn=restartOn if self._isArray(restartOn) else [restartOn]
          self.start(joinLoop=False)
-         while True:
-            self._sleep(sleep)
-            if self.settings.controlGC: self._controlGC() # call GC manually
-            if not restartOn: continue
-            for cb in restartOn:
-               if not cb: continue
-               elif self._isFunction(cb) and cb(self) is not True: continue
-               elif cb=='checkFileDescriptor' and not self._checkFileDescriptor(multiply=1.25): continue
-               self.restart(joinLoop=False)
-               break
+         try:
+            while True:
+               self._sleep(sleep)
+               if self.settings.controlGC: self._controlGC() # call GC manually
+               if not restartOn: continue
+               for cb in restartOn:
+                  if not cb: continue
+                  elif self._isFunction(cb) and cb(self) is not True: continue
+                  elif cb=='checkFileDescriptor' and not self._checkFileDescriptor(multiply=1.25): continue
+                  self.restart(joinLoop=False)
+                  break
+         except KeyboardInterrupt: pass
 
    def _startExecBackends(self):
       """
@@ -1744,12 +1749,16 @@ class flaskJSONRPCServer:
       self._startExecBackends()
       # reset flask routing (it useful when somebody change self.flaskApp)
       self._registerServerUrl(dict([[s, self._requestHandler] for s in self.pathsDef]))
-      if self.settings.allowCompress: self._logger(2, 'WARNING: included compression is slow')
+      if self.settings.allowCompress:
+         self._logger(2, 'WARNING: included compression is slow')
       if self.setts.gevent:
          # serving with gevent's pywsgi
          if self.setts.blocking:
             self._logger(2, 'WARNING: blocking mode not implemented for gevent')
-         self._tryGevent()
+         try:
+            self._tryGevent()
+         except Exception:
+            self._throw('You switch server to GEVENT mode, but gevent not founded. For switching to DEV mode (without GEVENT) please pass <gevent>=False to constructor')
          self._logger(3, 'Server running as gevent..')
          # check what patches supports installed gevent version
          monkeyPatchSupported, _, _, _=inspect.getargspec(geventMonkey.patch_all)
@@ -1761,20 +1770,17 @@ class flaskJSONRPCServer:
          geventMonkey.patch_all(**monkeyPatchArgs)
          self._importAll(forceDelete=True, scope=globals())
          # create server
-         try:
-            from gevent.pywsgi import WSGIServer
-         except ImportError:
-            self._throw('You switch server to GEVENT mode, but gevent not founded. For switching to DEV mode (without GEVENT) please pass <gevent>=False to constructor')
+         from gevent.pywsgi import WSGIServer
          from gevent.pool import Pool
          if self.setts.ssl: from gevent import ssl
          self._serverPool=[]
          self._server=[]
          wsgi=self.getWSGI()
+         logType=('default' if self.setts.debug else None)
          for i in xrange(len(self.setts.ip)):
             pool=Pool(None)
             self._serverPool.append(pool)
             bindAdress=self.setts.socket[i] if self.setts.socket[i] else (self.setts.ip[i], self.setts.port[i])
-            logType=('default' if self.setts.debug else None)
             # wrapping WSGI for detecting adress
             if self.setts.socket[i]:
                __flaskJSONRPCServer_binded=(True, self.setts.socketPath[i], self.setts.socket[i])
@@ -1798,8 +1804,10 @@ class flaskJSONRPCServer:
                server=WSGIServer(bindAdress, wsgiWrapped, log=logType, spawn=pool)
             self._server.append(server)
             # start wsgi backend
-            if joinLoop and i+1==len(self.setts.ip): server.serve_forever()
-            else: server.start()
+            try:
+               if joinLoop and i+1==len(self.setts.ip): server.serve_forever()
+               else: server.start()
+            except KeyboardInterrupt: pass
       else:
          # serving with werkzeug
          if any(self.setts.socket):
@@ -1829,9 +1837,11 @@ class flaskJSONRPCServer:
                return __wsgi(environ, start_response)
             # init and start wsgi backend
             server=self._thread(werkzeug_run, args=[self.setts.ip[i], self.setts.port[i], wsgiWrapped], kwargs={'ssl_context':sslContext, 'use_debugger':self.setts.debug, 'threaded':not(self.setts.blocking), 'use_reloader':False})
-            # server=self._thread(self.flaskApp.run, kwargs={'host':self.setts.ip[i], 'port':self.setts.port[i], 'ssl_context':sslContext, 'debug':self.setts.debug, 'threaded':not(self.setts.blocking)})
             self._server.append(server)
-            if joinLoop and i+1==len(self.setts.ip): server.join()
+            if joinLoop and i+1==len(self.setts.ip):
+               try:
+                  while True: self._sleep(1000)
+               except KeyboardInterrupt: pass
 
    def _werkzeugStop(self):
       """
@@ -1888,8 +1898,8 @@ class flaskJSONRPCServer:
 
    def stop(self, timeout=20, processingDispatcherCountMax=0):
       """
-      This method stop all execute backends of server, then stop serving backend (werkzeug or gevent.pywsgi for now).
-      For more info see <server>._waitProcessingDispatchers().
+      This method stop all execute backends of server, then stop serving backend (werkzeug or gevent.pywsgi for now). For more info see <server>._waitProcessingDispatchers().
+      Dont call this method from dispatchers!
 
       :param int timeout:
       :param int processingDispatcherCountMax:
