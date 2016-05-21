@@ -36,9 +36,10 @@ Response=None
 gevent=None
 geventMonkey=None
 
-from utils import magicDict, virtVar, deque2
+from utils import magicDict, virtVar, deque2, console
 
 import execBackend as execBackendCollection
+import servBackend as servBackendCollection
 
 try:
    import experimental as experimentalPack
@@ -52,9 +53,9 @@ class flaskJSONRPCServer:
 
    :param list ipAndPort: List or sequence, containing IP and PORT or SOCKET_PATH and SOCKET.
    :param bool multipleAdress: If True, <ipAndPort> must be list, containing different <ipAndPort>. All of them will be binded to this server.
-   :param bool blocking: Disable async mode and switch server to blocking mode(also known as one-threaded).
+   :param bool blocking: Switch server to blocking mode (only one request per time will be processed).
    :param bool|dict cors: Add CORS headers to output (Access-Control-Allow-*). If 'dict', can contain values for <origin> and <method>.
-   :param bool gevent: Use Gevent's PyWSGI insted of Flask's Werkzeug.
+   :param bool gevent: Patch Serv-backend and all process with Gevent.
    :param bool debug: Allow log messages from WSGI-backend.
    :param int|bool log: Set log-level or disable log messages about activity of flaskJSONRPCServer. If it's <int>, set log-level. 1 is error, 2 is warning, 3 is info, 4 is debug.
    :param bool fallback: Automatically accept and process JSONP requests.
@@ -63,17 +64,17 @@ class flaskJSONRPCServer:
    :param list(int,int) tweakDescriptors: List containing new soft and hard limits of file-descriptors for current process.
    :param int compressMinSize: Max length of output in bytes that was not compressed.
    :param str|obj jsonBackend: Select JSON-backend for json.loads() and json.dumps(). If this parameter 'str' type, module with passed name will be imported.  If this parameter 'obj' type, it must contain methods loads() and dumps().
-   :param str|dict|func notifBackend: Select default dispatcher-exec-backend for processing notify-requests. Lib include some prepared backends. Variable <execBackendCollection.execBackendMap> contained all of them. If this parameter 'dict' type, it must contain 'add' key as function, that will be called on every notify-request and recive all data about request. Optionally it can contain 'start' and 'stop' keys as functions (it will be called when server starting or stopping) and '_id' key, containing unique identificator. If this parameter 'func' type, it will used like 'add'.
-   :param str|dict|func dispatcherBackend: Select default dispatcher-exec-backend for processing regular requests. Lib include some prepared backends. Variable <execBackendCollection.execBackendMap> contained all of them. If this parameter 'dict' type, it must contain 'add' key as function, that will be called on every notify-request and recive all data about request. Also it must contain 'check' function, that will be called for waiting result of processed requests. Optionally it can contain 'start' and 'stop' keys as functions (it will be called when server starting or stopping) and '_id' key, containing unique identificator. If this parameter 'func' type, it will used like 'add'.
+   :param str|dict|'simple' dispatcherBackend: Select default dispatcher-exec-backend for processing regular requests. Lib include some prepared backends. Variable <execBackendCollection.execBackendMap> contained all of them. If this parameter 'dict' type, it must contain 'add' key as function, that will be called on every notify-request and recive all data about request, and '_id' key, containing unique identificator. Also it must contain 'check' function, that will be called for waiting result of processed requests. Optionally it can contain 'start' and 'stop' keys as functions (it will be called when server starting or stopping).
+   :param str|dict|'simple' notifBackend: Select default dispatcher-exec-backend for processing notify-requests. Lib include some prepared backends. Variable <execBackendCollection.execBackendMap> contained all of them. If this parameter 'dict' type, it must contain 'add' key as function, that will be called on every notify-request and recive all data about request, and '_id' key, containing unique identificator. Optionally it can contain 'start' and 'stop' keys as functions (it will be called when server starting or stopping).
    :param func auth: This function will be called on every request to server 9before processing it) and must return status as 'bool' type.
    :param bool experimental: If 'True', server will be patched with 'experimental' package.
    :param bool controlGC: If 'True', server will control GarbageCollector and manually call 'gc.collect()' (by default every 60 minutes or 300k requests or 50k dispatcher's calls).
    :param str magicVarForDispatcher: Name for variable, that can be passed to every dispatcher and will contain many useful data and methods. For more info see <server>.aboutMagicVarForDispatcher.
    :param str name: Optional name of server. Also used as flaskAppName. If not passed, it will be generated automatically.
+   :param str|dict|'auto' servBackend: Select serving-backend. Lib include some prepared backends. Variable <servBackendCollection.servBackendMap> contained all of them. If this parameter 'dict' type, it must contain 'start' key as function, that will be called on server's start, and '_id' key, containing unique identificator. Optionally it can contain 'stop' key as function (it will be called when server stopping).
    """
 
-   def __init__(self, bindAdress, multipleAdress=False, blocking=False, cors=False, gevent=False, debug=False, log=3, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=2*1024*1024, jsonBackend='simplejson', notifBackend='simple', dispatcherBackend='simple', auth=None, experimental=False, controlGC=True, magicVarForDispatcher='_connection', name=None):
-      self.consoleColor=magicDict({'header':'\033[95m', 'okblue':'\033[94m', 'okgreen':'\033[92m', 'warning':'\033[93m', 'fail':'\033[91m', 'end':'\033[0m', 'bold':'\033[1m', 'underline':'\033[4m'})
+   def __init__(self, bindAdress, multipleAdress=False, blocking=False, cors=False, gevent=False, debug=False, log=3, fallback=True, allowCompress=False, ssl=False, tweakDescriptors=(65536, 65536), compressMinSize=2*1024*1024, jsonBackend='simplejson', notifBackend='simple', dispatcherBackend='simple', auth=None, experimental=False, controlGC=True, magicVarForDispatcher='_connection', name=None, servBackend='auto'):
       # Flask imported here for avoiding error in setup.py if Flask not installed yet
       global Flask, request, Response
       from flask import Flask, request, Response
@@ -81,6 +82,7 @@ class flaskJSONRPCServer:
       self.name=name or self._randomEx(9999999, pref='flaskJSONRPCServer<', suf='>')
       self.flaskAppName=self.name
       self.version=__version__
+      self.servBackend=None
       self.settings=magicDict({
          'multipleAdress':multipleAdress,
          'ip':[],
@@ -91,6 +93,7 @@ class flaskJSONRPCServer:
          'fallback_JSONP':fallback,
          'CORS':cors,
          'gevent':gevent,
+         'servBackend':servBackend,
          'debug':debug,
          'log':log,
          'allowCompress':allowCompress,
@@ -108,6 +111,7 @@ class flaskJSONRPCServer:
          'controlGC_everySeconds':60*60, #every 60 minutes
          'controlGC_everyRequestCount':300*1000, #every 300k requests
          'controlGC_everyDispatcherCount':50*1000, #every 50k dispatcher's calls
+         'backlog':10*1000,
          'magicVarForDispatcher':magicVarForDispatcher
       })
       # set adress
@@ -121,7 +125,7 @@ class flaskJSONRPCServer:
             'socketPath':bind[0] if isSocket else None,
             'socket':bind[1] if isSocket else None
          }
-         for k, v in tArr.items():
+         for k, v in tArr.iteritems():
             self.settings[k].append(v)
       # other
       self.setts=self.settings # backward compatible
@@ -188,7 +192,10 @@ class flaskJSONRPCServer:
       if execBackend in self.execBackend: return execBackend
       # get _id of backend and prepare
       _id=None
-      if execBackend in execBackendCollection.execBackendMap: #custom exec-backend
+      if execBackend!='simple' and self._isString(execBackend): #registered serv-backend
+         if execBackend not in execBackendCollection.execBackendMap:
+            self._throw('Unknown Exec-backend "%s"'%execBackend)
+      # if execBackend in execBackendCollection.execBackendMap: #registered exec-backend
          execBackend=execBackendCollection.execBackendMap[execBackend](notif)
          _id=getattr(execBackend, '_id', None)
       elif execBackend=='simple': #without exec-backend
@@ -199,9 +206,11 @@ class flaskJSONRPCServer:
          execBackend=magicDict(execBackend)
       elif self._isInstance(execBackend):
          _id=getattr(execBackend, '_id', None)
-      else: self._throw('Unknow Exec-backend type: %s'%type(execBackend))
+      else:
+         self._throw('Unsupported Exec-backend type "%s"'%type(execBackend))
       # try to add execBackend
-      if not _id: self._throw('No _id in Exec-backend')
+      if not _id:
+         self._throw('No "_id" in Exec-backend "%s"'%execBackend)
       if execBackend and _id not in self.execBackend: # add execBackend to map if not exist
          self.execBackend[_id]=execBackend
       return _id
@@ -212,6 +221,8 @@ class flaskJSONRPCServer:
 
       :return list:  ['/static/<path:filename>', '/<path>/<method>/', '/<path>/<method>', '/<path>/', '/<path>'].
       """
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       res=[str(s) for s in self.flaskApp.url_map.iter_rules()]
       return res
 
@@ -226,7 +237,7 @@ class flaskJSONRPCServer:
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       if methods is None: methods=['GET', 'OPTIONS', 'POST']
       urlNow=self._getServerUrl()
-      for s, h in urlMap.items():
+      for s, h in urlMap.iteritems():
          if s in urlNow: continue
          self.flaskApp.add_url_rule(rule=s, view_func=h, methods=methods, strict_slashes=False)
 
@@ -245,14 +256,14 @@ class flaskJSONRPCServer:
       """
       #! Add checking with "monkey.is_module_patched()"
       #delete existed
-      for k, v in modules.items():
+      for k, v in modules.iteritems():
          if k in globals(): del globals()[k]
          if scope is not None and k in scope: del scope[k]
          if forceDelete and k in sys.modules: del sys.modules[k] # this allow unpatch monkey_patched libs
       # apply patchs
       if self.setts.gevent:
          self._tryGevent()
-         for k, v in modules.items():
+         for k, v in modules.iteritems():
             if not v: continue
             v=v if self._isArray(v) else [v]
             patchName=v[0]
@@ -263,11 +274,11 @@ class flaskJSONRPCServer:
             patchSupported, _, _, _=inspect.getargspec(patch)
             patchArgs_default=v[1] if len(v)>1 else {}
             patchArgs={}
-            for k, v in patchArgs_default.items():
+            for k, v in patchArgs_default.iteritems():
                if k in patchSupported: patchArgs[k]=v
             patch(**patchArgs)
       #add to scope
-      for k, v in modules.items():
+      for k, v in modules.iteritems():
          m=__import__(k)
          globals()[k]=m
          if scope is not None: scope[k]=m
@@ -725,7 +736,7 @@ class flaskJSONRPCServer:
             tArr1=scope.keys()
          elif filterByNameReversed: #exclude specific names
             tArr1=filterByName if self._isArray(filterByName) else [filterByName]
-            tArr1=[k for k in scope.keys() if k not in tArr1]
+            tArr1=[k for k in scope.iterkeys() if k not in tArr1]
          else: #include only specific names
             tArr1=filterByName if self._isArray(filterByName) else [filterByName]
          for k in tArr1:
@@ -943,13 +954,13 @@ class flaskJSONRPCServer:
       """
       res={'connPerSec_now':round(self.connPerMinute.count/60.0, 2), 'connPerSec_old':round(self.connPerMinute.oldCount/60.0, 2), 'connPerSec_max':round(self.connPerMinute.maxCount/60.0, 2), 'speedStats':{}, 'processingRequestCount':self.processingRequestCount, 'processingDispatcherCount':self.processingDispatcherCount}
       #calculate speed stats
-      for k, v in self.speedStats.items():
+      for k, v in self.speedStats.iteritems():
          v1=max(v)
          v2=sum(v)/float(len(v))
          res['speedStats'][k+'_max']=round(v1/1000.0, 1) if not inMS else round(v1, 1)
          res['speedStats'][k+'_average']=round(v2/1000.0, 1) if not inMS else round(v2, 1)
       #get backend's stats
-      for _id, backend in self.execBackend.items():
+      for _id, backend in self.execBackend.iteritems():
          if hasattr(backend, 'stats'): r=backend.stats(inMS=inMS)
          elif 'stats' in backend: r=backend['stats'](inMS=inMS)
          else: continue
@@ -1216,7 +1227,7 @@ class flaskJSONRPCServer:
          for oo in overload:
             if not oo: continue
             elif self._isDict(oo):
-               for k, v in oo.items(): setattr(module, k, v)
+               for k, v in oo.iteritems(): setattr(module, k, v)
             elif self._isFunction(oo): oo(self, module, dispatcher)
          # additional settings
          allowJSONP=o.get('fallback', None)
@@ -1264,6 +1275,7 @@ class flaskJSONRPCServer:
       :param str mimeType: Request's MimeType. You can change this for setting MimeType of Response.
       :param bool allowCompress: Is compressing allowed for this request. You can change it for forcing compression.
       :param instance server: Link to server's instance.
+      :param str serverName: Name of server.
       :param set(isRawSocket,(ip|socketPath),(port|socket)) servedBy: Info about server's adress. Usefull if you use multiple adresses for one server.
       :param dict('lock','unlock','wait','sleep','log',..) call: Some useful server's methods, you can call them.
       :param bool nativeThread: Is this request and dispatcher executed in native python thread.
@@ -1312,6 +1324,7 @@ class flaskJSONRPCServer:
                'mimeType':self._calcMimeType(request),
                'allowCompress':self.setts.allowCompress,
                'server':self,
+               'serverName':self.name,
                'servedBy':request.servedBy,
                'call':magicDict({
                   'lock':lambda: self.lock(dispatcher=dispatcher),
@@ -1328,7 +1341,7 @@ class flaskJSONRPCServer:
             }
             # overload _connection
             if self._isDict(overload):
-               for k, v in overload.items(): params[magicVarForDispatcher][k]=v
+               for k, v in overload.iteritems(): params[magicVarForDispatcher][k]=v
             elif self._isFunction(overload):
                params[magicVarForDispatcher]=overload(params[magicVarForDispatcher])
             params[magicVarForDispatcher]=magicDict(params[magicVarForDispatcher])
@@ -1433,15 +1446,13 @@ class flaskJSONRPCServer:
       :param Request() request:
       :return dict:
       """
-      if self._inChild():
-         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       # prepare for pickle
       #! #57 It must be on TYPE-based, not NAME-based
       convWhitelist=['REQUEST_METHOD', 'PATH_INFO', 'SERVER_PROTOCOL', 'QUERY_STRING', 'REMOTE_ADDR', 'CONTENT_LENGTH', 'HTTP_USER_AGENT', 'SERVER_NAME', 'REMOTE_PORT', 'wsgi.url_scheme', 'SERVER_PORT', 'HTTP_HOST', 'CONTENT_TYPE', 'HTTP_ACCEPT_ENCODING', 'GATEWAY_INTERFACE']
       r=magicDict({
          'headers':dict([s for s in request.headers]),
          'cookies':request.cookies,
-         'environ':dict([(k,v) for k,v in request.environ.items() if k in convWhitelist]),
+         'environ':dict([(k,v) for k,v in request.environ.iteritems() if k in convWhitelist]),
          'remote_addr':request.remote_addr,
          'method':request.method,
          'url':request.url,
@@ -1487,6 +1498,9 @@ class flaskJSONRPCServer:
             self.connPerMinute.minCount=self.connPerMinute.count
          self.connPerMinute.count=0
       self.connPerMinute.count+=1
+      # DeepLocking
+      self._deepWait()
+      if self.settings.blocking: self._deepLock()
       # processing request
       try:
          res=self._requestProcess(path, method)
@@ -1497,6 +1511,7 @@ class flaskJSONRPCServer:
          if self.settings.controlGC: self._controlGC() # call GC manually
          res=Response(status=500, response=s)
       self.processingRequestCount-=1
+      if self.settings.blocking: self._deepUnlock()
       return res
 
    def _requestProcess(self, path, method):
@@ -1509,8 +1524,6 @@ class flaskJSONRPCServer:
       """
       if self._inChild():
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
-      # DeepLock
-      self._deepWait()
       path=self._formatPath(path)
       if path not in self.routes:
          self._logger(2, 'UNKNOWN_PATH:', path)
@@ -1573,7 +1586,7 @@ class flaskJSONRPCServer:
                   # select backend for executing
                   if dataIn['id'] is None: #notification request
                      execBackend=self.execBackend.get(dispatcher.notifBackendId, None)
-                     if hasattr(execBackend, 'add'):
+                     if execBackend and hasattr(execBackend, 'add'):
                         status, m=execBackend.add(uniqueId, path, dataIn, requestCopy)
                         if not status:
                            self._logger(1, 'Error in notifBackend.add(): %s'%m)
@@ -1625,7 +1638,7 @@ class flaskJSONRPCServer:
             self._logger(2, 'JSONP_DENIED:', path, method)
             return Response(status=403)
          else: #process correct request
-            params=dict([(k, v) for k, v in request.args.items()])
+            params=dict([(k, v) for k, v in request.args.iteritems()])
             if 'jsonp' in params: del params['jsonp']
             dataIn={'method':method, 'params':params}
             # generate unique id
@@ -1667,7 +1680,7 @@ class flaskJSONRPCServer:
             dataOut=out[0]['jsonpCB']%(dataOut)
       self._logger(4, 'RESPONSE:', dataOut)
       resp=Response(response=dataOut, status=200, mimetype=mimeType)
-      for hk, hv in outHeaders.items(): resp.headers[hk]=hv
+      for hk, hv in outHeaders.iteritems(): resp.headers[hk]=hv
       for c in outCookies:
          try:
             resp.set_cookie(c.get('name', ''), c.get('value', ''), expires=c.get('expires', 2147483647), domain=c.get('domain', '*'))
@@ -1727,14 +1740,66 @@ class flaskJSONRPCServer:
       if self._inChild():
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       # start execBackends
-      for _id, bck in self.execBackend.items():
+      for _id, bck in self.execBackend.iteritems():
          if hasattr(bck, 'start'): bck.start(self)
 
    def getWSGI(self):
       """
       This method return WSGI-app of server.
       """
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       return self.flaskApp.wsgi_app
+
+   def _registerServBackend(self, servBackend):
+      """
+      This merhod register new serving backend in server, backend will be start when <server>.start() called.
+
+      :param str|obj servBackend: registered backend name or obj.
+      :return: unique identification.
+      """
+      if self._inChild():
+         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
+      # get _id of backend and prepare
+      _id=None
+      if self._isString(servBackend): #registered serv-backend
+         if servBackend not in servBackendCollection.servBackendMap:
+            self._throw('Unknown Serv-backend "%s"'%servBackend)
+         servBackend=servBackendCollection.servBackendMap[servBackend]()
+         _id=getattr(servBackend, '_id', None)
+      elif self._isDict(servBackend):
+         _id=servBackend.get('_id', None)
+         servBackend=magicDict(servBackend)
+      elif self._isInstance(servBackend):
+         _id=getattr(servBackend, '_id', None)
+      else:
+         self._throw('Unsupported Serv-backend type "%s"'%type(servBackend))
+      # try to use servBackend
+      if not _id:
+         self._throw('No "_id" in Serv-backend "%s"'%servBackend)
+      if not hasattr(servBackend, 'start'):
+         self._throw('No "start" method in Serv-backend "%s"'%servBackend)
+      self.servBackend=servBackend
+      return _id
+
+   def _patchWithGevent(self):
+      """
+      Patching current process for compatible with gevent.
+      """
+      try:
+         self._tryGevent()
+      except Exception:
+         self._throw('You switch server to GEVENT mode, but gevent not founded. For switching to DEV mode (without GEVENT) please pass <gevent>=False to constructor')
+      # check what patches supports installed gevent version
+      monkeyPatchSupported, _, _, _=inspect.getargspec(geventMonkey.patch_all)
+      monkeyPatchArgs_default={'socket':False, 'dns':False, 'time':False, 'select':False, 'thread':False, 'os':True, 'ssl':False, 'httplib':False, 'subprocess':True, 'sys':False, 'aggressive':True, 'Event':False, 'builtins':True, 'signal':True}
+      monkeyPatchArgs={}
+      for k, v in monkeyPatchArgs_default.iteritems():
+         if k in monkeyPatchSupported: monkeyPatchArgs[k]=v
+      # monkey patching
+      geventMonkey.patch_all(**monkeyPatchArgs)
+      self._importAll(forceDelete=True, scope=globals())
+      self._logger(3, 'Process patched with gevent')
 
    def start(self, joinLoop=False):
       """
@@ -1745,123 +1810,145 @@ class flaskJSONRPCServer:
       """
       if self._inChild():
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
-      # start execBackends
-      self._startExecBackends()
       # reset flask routing (it useful when somebody change self.flaskApp)
       self._registerServerUrl(dict([[s, self._requestHandler] for s in self.pathsDef]))
+      # start execBackends
+      self._startExecBackends()
       if self.settings.allowCompress:
          self._logger(2, 'WARNING: included compression is slow')
+      if self.setts.blocking:
+         self._logger(2, 'WARNING: server work in blocking mode')
       if self.setts.gevent:
-         # serving with gevent's pywsgi
-         if self.setts.blocking:
-            self._logger(2, 'WARNING: blocking mode not implemented for gevent')
-         try:
-            self._tryGevent()
-         except Exception:
-            self._throw('You switch server to GEVENT mode, but gevent not founded. For switching to DEV mode (without GEVENT) please pass <gevent>=False to constructor')
-         self._logger(3, 'Server running as gevent..')
-         # check what patches supports installed gevent version
-         monkeyPatchSupported, _, _, _=inspect.getargspec(geventMonkey.patch_all)
-         monkeyPatchArgs_default={'socket':False, 'dns':False, 'time':False, 'select':False, 'thread':False, 'os':True, 'ssl':False, 'httplib':False, 'subprocess':True, 'sys':False, 'aggressive':True, 'Event':False, 'builtins':True, 'signal':True}
-         monkeyPatchArgs={}
-         for k, v in monkeyPatchArgs_default.items():
-            if k in monkeyPatchSupported: monkeyPatchArgs[k]=v
-         # monkey patching
-         geventMonkey.patch_all(**monkeyPatchArgs)
-         self._importAll(forceDelete=True, scope=globals())
-         # create server
-         from gevent.pywsgi import WSGIServer
-         from gevent.pool import Pool
-         if self.setts.ssl: from gevent import ssl
-         self._serverPool=[]
-         self._server=[]
-         wsgi=self.getWSGI()
-         logType=('default' if self.setts.debug else None)
-         for i in xrange(len(self.setts.ip)):
-            pool=Pool(None)
-            self._serverPool.append(pool)
-            bindAdress=self.setts.socket[i] if self.setts.socket[i] else (self.setts.ip[i], self.setts.port[i])
-            # wrapping WSGI for detecting adress
-            if self.setts.socket[i]:
-               __flaskJSONRPCServer_binded=(True, self.setts.socketPath[i], self.setts.socket[i])
-            else:
-               __flaskJSONRPCServer_binded=(False, self.setts.ip[i], self.setts.port[i])
-            def wsgiWrapped(environ, start_response, __flaskJSONRPCServer_binded=__flaskJSONRPCServer_binded, __wsgi=wsgi):
-               environ['__flaskJSONRPCServer_binded']=__flaskJSONRPCServer_binded
-               return __wsgi(environ, start_response)
-            # init wsgi backend
-            if self.setts.ssl:
-               # from functools import wraps
-               # def sslwrap(func):
-               #    @wraps(func)
-               #    def bar(*args, **kw):
-               #       kw['ssl_version']=ssl.PROTOCOL_TLSv1
-               #       return func(*args, **kw)
-               #    return bar
-               # ssl.wrap_socket=sslwrap(ssl.wrap_socket)
-               server=WSGIServer(bindAdress, wsgiWrapped, log=logType, spawn=pool, keyfile=self.setts.ssl[0], certfile=self.setts.ssl[1], ssl_version=ssl.PROTOCOL_TLSv1_2) #ssl.PROTOCOL_SSLv23
-            else:
-               server=WSGIServer(bindAdress, wsgiWrapped, log=logType, spawn=pool)
-            self._server.append(server)
-            # start wsgi backend
-            try:
-               if joinLoop and i+1==len(self.setts.ip): server.serve_forever()
-               else: server.start()
-            except KeyboardInterrupt: pass
-      else:
+         self._patchWithGevent()
+      # select serving backend
+      if not self.servBackend:
+         servBackend=self.settings.servBackend
+         if servBackend=='auto':
+            servBackend='pywsgi' if self.setts.gevent else 'wsgiex'
+         _id=self._registerServBackend(servBackend)
+      # checking compatibility
+      if self.setts.gevent and not getattr(self.servBackend, '_supportGevent', False):
+         self._throw('Using Gevent not supported with selected Serv-backend "%s"'%_id)
+      if not self.setts.gevent and not getattr(self.servBackend, '_supportNative', False):
+         self._throw('Working without Gevent not supported with selected Serv-backend "%s"'%_id)
+      if any(self.setts.socket) and not getattr(self.servBackend, '_supportRawSocket', False):
+         self._throw('Serving on raw-socket not supported with selected Serv-backend "%s"'%_id)
+      # run serving backend
+      self._logger(3, 'Server running as %s..'%_id)
+      self._server=[]
+      wsgi=self.getWSGI()
+      for i in xrange(len(self.setts.ip)):
+         # select bindAdress
+         bindAdress=self.setts.socket[i] if self.setts.socket[i] else (self.setts.ip[i], self.setts.port[i])
+         # wrapping WSGI for detecting adress
+         if self.setts.socket[i]:
+            s=(True, self.setts.socketPath[i], self.setts.socket[i])
+         else:
+            s=(False, self.setts.ip[i], self.setts.port[i])
+         def wsgiWrapped(environ, start_response, __flaskJSONRPCServer_binded=s, __wsgi=wsgi):
+            environ['__flaskJSONRPCServer_binded']=__flaskJSONRPCServer_binded
+            return __wsgi(environ, start_response)
+         # start
+         self.servBackend.start(bindAdress, wsgiWrapped, self, joinLoop=(joinLoop and i+1==len(self.setts.ip)))
+      # if self.setts.gevent and self.settings.useWsgiex!='force':
+      #    # serving with gevent's pywsgi
+      #    self.servBackend='pywsgi'
+      #    self._logger(3, 'Server running as gevent.pywsgi..')
+      #    from gevent.pywsgi import WSGIServer
+      #    from gevent.pool import Pool
+      #    if self.setts.ssl: from gevent import ssl
+      #    self._serverPool=[]
+      #    logType=('default' if self.setts.debug else None)
+      #    for i in xrange(len(self.setts.ip)):
+      #       pool=Pool(None)
+      #       self._serverPool.append(pool)
+      #       bindAdress=self.setts.socket[i] if self.setts.socket[i] else (self.setts.ip[i], self.setts.port[i])
+      #       # wrapping WSGI for detecting adress
+      #       if self.setts.socket[i]:
+      #          __flaskJSONRPCServer_binded=(True, self.setts.socketPath[i], self.setts.socket[i])
+      #       else:
+      #          __flaskJSONRPCServer_binded=(False, self.setts.ip[i], self.setts.port[i])
+      #       def wsgiWrapped(environ, start_response, __flaskJSONRPCServer_binded=__flaskJSONRPCServer_binded, __wsgi=wsgi):
+      #          environ['__flaskJSONRPCServer_binded']=__flaskJSONRPCServer_binded
+      #          return __wsgi(environ, start_response)
+      #       # init wsgi backend
+      #       if self.setts.ssl:
+      #          # from functools import wraps
+      #          # def sslwrap(func):
+      #          #    @wraps(func)
+      #          #    def bar(*args, **kw):
+      #          #       kw['ssl_version']=ssl.PROTOCOL_TLSv1
+      #          #       return func(*args, **kw)
+      #          #    return bar
+      #          # ssl.wrap_socket=sslwrap(ssl.wrap_socket)
+      #          server=WSGIServer(bindAdress, wsgiWrapped, log=logType, spawn=pool, backlog=10*1000, keyfile=self.setts.ssl[0], certfile=self.setts.ssl[1], ssl_version=ssl.PROTOCOL_TLSv1_2) #ssl.PROTOCOL_SSLv23
+      #       else:
+      #          server=WSGIServer(bindAdress, wsgiWrapped, log=logType, spawn=pool, backlog=10*1000)
+      #       self._server.append(server)
+      #       # start wsgi backend
+      #       try:
+      #          if joinLoop and i+1==len(self.setts.ip): server.serve_forever()
+      #          else: server.start()
+      #       except KeyboardInterrupt: pass
+      # elif self.settings.useWsgiex:
+      #    # serving with wsgiex
+      #    self.servBackend='wsgiex'
+      #    self._logger(3, 'Server running as wsgiex..')
+      #    self._serverThread=[]
+      #    for i in xrange(len(self.setts.ip)):
+      #       bindAdress=self.setts.socket[i] if self.setts.socket[i] else (self.setts.ip[i], self.setts.port[i])
+      #       # wrapping WSGI for detecting adress
+      #       if self.setts.socket[i]:
+      #          __flaskJSONRPCServer_binded=(True, self.setts.socketPath[i], self.setts.socket[i])
+      #       else:
+      #          __flaskJSONRPCServer_binded=(False, self.setts.ip[i], self.setts.port[i])
+      #       def wsgiWrapped(environ, start_response, __flaskJSONRPCServer_binded=__flaskJSONRPCServer_binded, __wsgi=wsgi):
+      #          environ['__flaskJSONRPCServer_binded']=__flaskJSONRPCServer_binded
+      #          return __wsgi(environ, start_response)
+      #       # init and start wsgi backend
+      #       server=servBackendCollection.wsgiex(bindAdress, wsgiWrapped, log=self.setts.debug, threaded=True, useGevent=self.setts.gevent, sslArgs=self.setts.ssl, backlog=10*1000)
+      #       serverThread=self._thread(server.serve_forever)
+      #       self._server.append(server)
+      #       self._serverThread.append(serverThread)
+      #       if joinLoop and i+1==len(self.setts.ip):
+      #          try:
+      #             while True: self._sleep(1000)
+      #          except KeyboardInterrupt: pass
+      # else:
          # serving with werkzeug
-         if any(self.setts.socket):
-            self._throw('Serving on raw-socket not supported without gevent')
-         self._logger(4, 'SERVER RUNNING..')
-         if not self.setts.debug:
-            import logging
-            log=logging.getLogger('werkzeug')
-            log.setLevel(logging.ERROR)
-         sslContext=None
-         if self.setts.ssl:
-            import ssl
-            sslContext=ssl.SSLContext(ssl.PROTOCOL_TLSv1_2) #SSL.Context(SSL.SSLv23_METHOD)
-            sslContext.load_cert_chain(self.setts.ssl[1], self.setts.ssl[0])
-         self._registerServerUrl({'/_werkzeugStop/':self._werkzeugStop}, methods=['GET'])
-         self._server=[]
-         wsgi=self.getWSGI()
-         from werkzeug.serving import run_simple as werkzeug_run
-         for i in xrange(len(self.setts.ip)):
-            # wrapping WSGI for detecting adress
-            if self.setts.socket[i]:
-               __flaskJSONRPCServer_binded=(True, self.setts.socketPath[i], self.setts.socket[i])
-            else:
-               __flaskJSONRPCServer_binded=(False, self.setts.ip[i], self.setts.port[i])
-            def wsgiWrapped(environ, start_response, __flaskJSONRPCServer_binded=__flaskJSONRPCServer_binded, __wsgi=wsgi):
-               environ['__flaskJSONRPCServer_binded']=__flaskJSONRPCServer_binded
-               return __wsgi(environ, start_response)
-            # init and start wsgi backend
-            server=self._thread(werkzeug_run, args=[self.setts.ip[i], self.setts.port[i], wsgiWrapped], kwargs={'ssl_context':sslContext, 'use_debugger':self.setts.debug, 'threaded':not(self.setts.blocking), 'use_reloader':False})
-            self._server.append(server)
-            if joinLoop and i+1==len(self.setts.ip):
-               try:
-                  while True: self._sleep(1000)
-               except KeyboardInterrupt: pass
-
-   def _werkzeugStop(self):
-      """
-      This method implement hack for stopping flask's "werkzeug" WSGI backend.
-      For more info see http://flask.pocoo.org/snippets/67/.
-
-      :return str|None: Error message if some problems happened.
-      """
-      if self._inChild():
-         self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
-      try:
-         token1=request.args.get('token', '')
-         token2=self._werkzeugStopToken
-         self._werkzeugStopToken=''
-         if not token2 or not token1 or token1!=token2: return 'Access denied'
-         stop=request.environ.get('werkzeug.server.shutdown')
-         if stop is None:
-            return 'Cant find "werkzeug.server.shutdown"'
-         else: stop()
-      except Exception, e: return e
+         # if any(self.setts.socket):
+         #    self._throw('Serving on raw-socket not supported without gevent')
+         # self.servBackend='werkzeug'
+         # self._logger(3, 'Server running as werkzeug..')
+         # from werkzeug.serving import make_server as werkzeug
+         # if not self.setts.debug:
+         #    import logging
+         #    log=logging.getLogger('werkzeug')
+         #    log.setLevel(logging.ERROR)
+         # sslContext=None
+         # if self.setts.ssl:
+         #    import ssl
+         #    sslContext=ssl.SSLContext(ssl.PROTOCOL_TLSv1_2) #SSL.Context(SSL.SSLv23_METHOD)
+         #    sslContext.load_cert_chain(self.setts.ssl[1], self.setts.ssl[0])
+         # self._serverThread=[]
+         # for i in xrange(len(self.setts.ip)):
+         #    # wrapping WSGI for detecting adress
+         #    if self.setts.socket[i]:
+         #       __flaskJSONRPCServer_binded=(True, self.setts.socketPath[i], self.setts.socket[i])
+         #    else:
+         #       __flaskJSONRPCServer_binded=(False, self.setts.ip[i], self.setts.port[i])
+         #    def wsgiWrapped(environ, start_response, __flaskJSONRPCServer_binded=__flaskJSONRPCServer_binded, __wsgi=wsgi):
+         #       environ['__flaskJSONRPCServer_binded']=__flaskJSONRPCServer_binded
+         #       return __wsgi(environ, start_response)
+         #    # init and start wsgi backend
+         #    server=werkzeug(self.setts.ip[i], self.setts.port[i], wsgiWrapped, threaded=not(self.setts.blocking), ssl_context=sslContext)
+         #    serverThread=self._thread(server.serve_forever)
+         #    self._server.append(server)
+         #    self._serverThread.append(serverThread)
+         #    if joinLoop and i+1==len(self.setts.ip):
+         #       try:
+         #          while True: self._sleep(1000)
+         #       except KeyboardInterrupt: pass
 
    def _stopExecBackends(self, timeout=20, processingDispatcherCountMax=0):
       """
@@ -1874,7 +1961,7 @@ class flaskJSONRPCServer:
       if self._inChild():
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       mytime=self._getms()
-      for _id, bck in self.execBackend.items():
+      for _id, bck in self.execBackend.iteritems():
          if hasattr(bck, 'stop'):
             bck.stop(self, timeout=timeout-(self._getms()-mytime)/1000.0, processingDispatcherCountMax=processingDispatcherCountMax)
 
@@ -1906,32 +1993,39 @@ class flaskJSONRPCServer:
       """
       if self._inChild():
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
+      if not hasattr(self.servBackend, 'stop'):
+         self._throw('Stopping not provided by Serv-backend "%s"'%self.servBackend)
       self._deepLock()
       mytime=self._getms()
       self._waitProcessingDispatchers(timeout=timeout, processingDispatcherCountMax=processingDispatcherCountMax)
       # stop execBackends
       self._stopExecBackends(timeout=timeout-(self._getms()-mytime)/1000.0, processingDispatcherCountMax=processingDispatcherCountMax)
       withError=[]
-      # stop server's backend
-      if self.setts.gevent:
-         for s in self._server:
-            try: s.stop(timeout=timeout-(self._getms()-mytime)/1000.0)
-            except Exception, e: withError.append(e)
-      else:
-         for i in xrange(len(self._server)):
-            self._werkzeugStopToken=self._randomEx(999999)
-            #! all other methods, like "test_client()" and "test_request_context()", not has "return werkzeug.server.shutdown" in request.environ
-            try:
-               r=urllib2.urlopen('http://%s:%s/_werkzeugStop/?token=%s'%(self.setts.ip[i], self.setts.port[i], self._werkzeugStopToken)).read()
-               if r: withError.append(r)
-            except Exception, e: pass # error is normal in this case
+      # stop serving backend
+      for i, s in enumerate(self._server):
+         try:
+            self.servBackend.stop(s, i, self, timeout=timeout-(self._getms()-mytime)/1000.0)
+         except Exception, e: withError.append(e)
+      # if self.servBackend=='pywsgi':
+      #    for s in self._server:
+      #       try:
+      #          s.stop(timeout=timeout-(self._getms()-mytime)/1000.0)
+      #       except Exception, e: withError.append(e)
+      # elif self.servBackend=='werkzeug':
+      #    for i in xrange(len(self._server)):
+      #       try:
+      #          self._server[i]._BaseServer__shutdown_request=True
+      #          self._server[i]._BaseServer__serving=False
+      #          self._serverThread[i].join(timeout-(self._getms()-mytime)/1000.0)
+      #       except Exception, e: withError.append(e)
+      # else:
+      #    withError.append('Stopping not provided for servBackend "%s"'%self.servBackend)
       # check is errors happened
       if withError:
          self._deepUnlock()
          self._throw('\n'.join(withError))
       self._logger(3, 'SERVER STOPPED')
-      if not self.setts.gevent:
-         self._logger(0, 'INFO: Ignore all errors about "Unhandled exception in thread started by ..."\n')
+      self._logger(0, 'INFO: Ignore all errors about "Unhandled exception in thread started by ..."\n')
       self.processingRequestCount=0
       self._deepUnlock()
 

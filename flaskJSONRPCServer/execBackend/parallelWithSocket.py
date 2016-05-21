@@ -284,7 +284,7 @@ class execBackend:
       # create hashmap for parentGlobals
       self.parentGlobals_oldHash={}
       if self.settings.importGlobalsFromParent:
-         for k, v in self.parentGlobals.items():
+         for k, v in self.parentGlobals.iteritems():
             if not isinstance(v, self.settings.importGlobalsFromParent_typeForVarCheck): continue
             h=self.var2hash(v, k)
             if h: self.parentGlobals_oldHash[k]=h
@@ -329,7 +329,7 @@ class execBackend:
    def childSendLazyRequest(self):
       if self._lazyRequestLastTime is None: self._lazyRequestLastTime=self._server._getms()
       if self._lazyRequestLastTime is not True and self._server._getms()-self._lazyRequestLastTime<self.settings.sleepTime_lazyRequest: return
-      for rId, v in self._lazyRequest.items():
+      for rId, v in self._lazyRequest.iteritems():
          if not len(v): continue
          path=self._server._strGet(rId, '', '<')
          self._lazyRequest[rId]=v[self.settings.lazyRequestChunk:]
@@ -353,7 +353,7 @@ class execBackend:
       convBlackList=['server', 'call', 'dispatcher']
       # convWhitelist=['cookies', 'cookiesOut', 'ip', 'notify', 'jsonp', 'path', 'parallelType', 'parallelPoolSize', 'headersOut', 'dispatcherName', 'headers', 'nativeThread', 'allowCompress']
       if '_connection' in params:
-         params['_connection']=dict([(k,v) for k,v in params['_connection'].items() if k not in convBlackList])
+         params['_connection']=dict([(k,v) for k,v in params['_connection'].iteritems() if k not in convBlackList])
       self.sendRequest('/queue', 'result', [p['uniqueId'], status, params, result])
       self._server.processingDispatcherCount-=1
 
@@ -386,7 +386,7 @@ class execBackend:
 
    def childDisableNotImplemented(self):
       # disable none-implemented methods in parentServer for preventing call them from dispatcher
-      whiteList=['_callDispatcher', '_checkFileDescriptor', '_compressResponse', '_copyRequestContext', '_countFileDescriptor', '_fixJSON', '_formatPath', '_getErrorInfo', '_getms', '_getScriptName', '_getScriptPath', '_getServerUrl', '_inChild', '_isArray', '_isDict', '_isFunction', '_isInstance', '_isModule', '_isNum', '_isString', '_parseRequest', '_prepResponse', '_strGet', '_tweakLimit', 'fixJSON', '_sleep', '_thread', '_randomEx', '_countMemory', '_calcMimeType']
+      whiteList=['_callDispatcher', '_checkFileDescriptor', '_compressResponse', '_copyRequestContext', '_countFileDescriptor', '_fixJSON', '_formatPath', '_getErrorInfo', '_getms', '_getScriptName', '_getScriptPath', '_inChild', '_isArray', '_isDict', '_isFunction', '_isInstance', '_isModule', '_isNum', '_isString', '_isTuple', '_parseRequest', '_prepResponse', '_strGet', '_tweakLimit', 'fixJSON', '_randomEx', '_countMemory', '_calcMimeType']
       for name in dir(self._parentServer):
          if not self._parentServer._isFunction(getattr(self._parentServer, name)): continue
          if name not in whiteList:
@@ -395,7 +395,7 @@ class execBackend:
 
    def childReplaceToPatched(self):
       # replace some methods in parentServer to patched (of modified) methods from this process
-      whatList=['_compressGZIP', '_uncompressGZIP', '_fileGet', '_fileWrite', '_import', '_importAll', '_importSocket', '_importThreading', '_logger', '_loggerPrep', '_parseJSON', '_serializeJSON', '_sha1', '_sha256', '_throw', '_sleep', '_thread', '_controlGC']
+      whatList=['_compressGZIP', '_uncompressGZIP', '_fileGet', '_fileWrite', '_import', '_importAll', '_importSocket', '_importThreading', '_logger', '_loggerPrep', '_parseJSON', '_serializeJSON', '_sha1', '_sha256', '_throw', '_sleep', '_thread', '_controlGC', '_patchWithGevent', '_tryGevent']
       for name in whatList:
          setattr(self._parentServer, name, getattr(self._server, name))
 
@@ -427,7 +427,7 @@ class execBackend:
                   return data['cb'](None, data['error'], _connection)
                else: self._server._throw(data['error'])
             res={}
-            for k, r in data['result'].items():
+            for k, r in data['result'].iteritems():
                if not r[0]: # not changed
                   res[k]=self.parentGlobals.get(k, None)
                   self._server._logger(4, 'CopyGlobal var "%s": not changed'%k)

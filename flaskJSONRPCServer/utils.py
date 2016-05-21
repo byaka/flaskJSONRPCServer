@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import httplib
+import httplib, sys, os
 from virtVar import virtVar
 import gmultiprocessing
 import collections
@@ -49,6 +49,39 @@ class magicDict(dict):
    __setattr__=dict.__setitem__
    __delattr__=dict.__delitem__
    __reduce__=dict.__reduce__
+
+consoleColor=magicDict({
+   'header':'\033[95m',
+   'okBlue':'\033[94m',
+   'okGreen':'\033[92m',
+   'ok':'\033[92m',
+   'warning':'\033[93m',
+   'fail':'\033[91m',
+   'end':'\033[0m',
+   'bold':'\033[1m',
+   'underline':'\033[4m',
+   'clearLast':'\033[F\033[K'
+})
+
+def consoleClear():
+   """
+   Clear console outpur (linux,windows)
+   """
+   if sys.platform=='win32': os.system('cls')
+   else: os.system('clear')
+
+def consoleIsTerminal():
+   """
+   Check, is program runned in terminal or not.
+   """
+   return sys.stdout.isatty()
+
+global console
+console=magicDict({
+   'clear':consoleClear,
+   'inTerm':consoleIsTerminal,
+   'color':consoleColor
+})
 
 if __name__=='__main__':
    v1=virtVar('test')

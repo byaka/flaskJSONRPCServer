@@ -7,8 +7,6 @@ https://bitbucket.org/jgehrcke/gipc/
 
 import os, sys, signal, multiprocessing, multiprocessing.process, multiprocessing.reduction
 
-# import gevent, gevent.os, gevent.lock, gevent.event
-
 gevent=None
 geventEvent=None
 
