@@ -36,15 +36,15 @@ Pros
 ~~~~
 
 -  Lib ready for **production**, we use it in some products
--  Lib tested over **"highload"** (over 60 connections per second, 24/7
+-  Lib tested over **"highload"** (over 100 connections per second, 24/7
    and it's not simulation) with **Gevent** enabled and no stability
    issues or memory leak (this is why i'm wrote this library)
 -  Auto **CORS**
--  Simple switching to **Gevent** as backend
+-  Simple switching to **Gevent**
 -  Auto fallback to **JSONP** on GET requests (for old browsers, that
    don't support CORS like **IE**\ <10)
 -  Dispatchers can simply get info about connection (**IP**,
-   **Cookies**, **Headers**)
+   **Cookies**, **Headers** and many more)
 -  Dispatchers can simply set **Cookies**, change output **Headers**,
    change output format for **JSONP** requests
 -  Lib fully support **Notification** requests (see *example/notify.py*)
@@ -57,8 +57,8 @@ Pros
    (see *example/mergeFlaskApp.py*)
 -  Lib supports different **execution-backends**, for example
    multiprocessing (see *example/parallelExecuting.py*)
--  Lib supports **locking** (you can lock all server or specific
-   dispatchers)
+-  Lib supports **locking** (you can switch all server or specific
+   dispatchers to one-request-per-time mode)
 -  Lib supports different **serializing-backends** so you can implement
    any protocol, not only JSON
 -  Lib supports **individual settings** for different dispatchers. For
@@ -69,8 +69,7 @@ Pros
 Cons
 ~~~~
 
--  Not fully **documentated**. For now only examples in package and `API
-   documentation <https://byaka.github.io/flaskJSONRPCServer-docs/>`__.
+-  Not fully **documentated**. Current documentation `here <https://byaka.github.io/flaskJSONRPCServer-docs/>`__.
 -  Lib not has **decorators**, so it not a "Flask-way" (this can be
    simply added, but i not use decorators, sorry)
 -  Lib not covered with **tests**.
@@ -131,18 +130,18 @@ Simple server. More examples you can find in directory *example/*
     if __name__=='__main__':
        print 'Running api..'
        # Creating instance of server
-       #    <blocking>         switch server to sync mode when <gevent> is False
+       #    <blocking>         switch server to one-request-per-time mode
        #    <cors>             switch auto CORS support
-       #    <gevent>           switch to using Gevent as backend
+       #    <gevent>           switch to using Gevent
        #    <debug>            switch to logging connection's info from Flask
-       #    <log>              switch to logging debug info from flaskJSONRPCServer
+       #    <log>              set log level
        #    <fallback>         switch auto fallback to JSONP on GET requests
        #    <allowCompress>    switch auto compression
        #    <compressMinSize>  set min limit for compression
        #    <tweakDescriptors> set descriptor's limit for server
        #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
        #    <notifBackend>     set backend for Notify-requests
-       server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=False, fallback=True, allowCompress=False, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000])
+       server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=3, fallback=True, allowCompress=False, jsonBackend='simplejson', notifBackend='threaded', tweakDescriptors=[1000, 1000])
        # Register dispatcher for all methods of instance
        server.registerInstance(mySharedMethods(), path='/api')
        # same name, but another path
