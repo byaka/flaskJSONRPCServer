@@ -46,7 +46,7 @@ class execBackend:
       self._mainCicleThread=server._thread(self.mainCicle)
 
    def mainCicle(self):
-      #main cicle for processing notifs. Run on strating backend
+      #main cicle for processing notifs. Run on starting backend
       while True:
          self._parentServer._deepWait()
          self._parentServer._sleep(self.settings.sleepTime_cicleWait)
@@ -71,10 +71,13 @@ class execBackend:
       #callback for adding notif to queue
       try:
          self.queue.append({'uniqueId':uniqueId, 'isJSONP':isJSONP, 'path':path, 'dataIn':dataIn, 'request':request, 'mytime':self._parentServer._getms()})
-         return True, len(self.queue)
+         return True, len(self.queue), None
       except Exception, e:
          print '!!! ERROR _notifBackend_threadPool_add', e
-         return None, str(e)
+         return None, str(e), None
+
+   # def check(self, uniqueId, _):
+   #    pass
 
    def stats(self, inMS=False):
       r={

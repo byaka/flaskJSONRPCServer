@@ -164,17 +164,19 @@ def stats(_connection=None):
 if __name__=='__main__':
    print 'Running api..'
    # Creating instance of server
-   #    <blocking>         switch server to sync mode when <gevent> is False
+   #    <blocking>         switch server to one-request-per-time mode
    #    <cors>             switch auto CORS support
-   #    <gevent>           switch to using Gevent as backend
-   #    <debug>            switch to logging connection's info from Flask
-   #    <log>              switch to logging debug info from flaskJSONRPCServer
+   #    <gevent>           switch to patching process with Gevent
+   #    <debug>            switch to logging connection's info from serv-backend
+   #    <log>              set logging level (0-critical, 1-errors, 2-warnings, 3-info, 4-debug)
    #    <fallback>         switch auto fallback to JSONP on GET requests
    #    <allowCompress>    switch auto compression
    #    <compressMinSize>  set min limit for compression
-   #    <tweakDescriptors> set descriptor's limit for server
-   #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
-   #    <notifBackend>     set backend for Notify-requests
+   #    <tweakDescriptors> set file-descriptor's limit for server (useful on high-load servers)
+   #    <jsonBackend>      set JSON-backend. Auto fallback to native when problems
+   #    <notifBackend>     set exec-backend for Notify-requests
+   #    <servBackend>      set serving-backend ('pywsgi', 'werkzeug', 'wsgiex' or 'auto'). 'auto' is more preffered
+   #    <experimental>     switch using of experimental perfomance-patches
    server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=3, fallback=True, allowCompress=False, jsonBackend='simplejson', tweakDescriptors=[1000, 1000], dispatcherBackend='parallelWithSocket', notifBackend='simple', experimental=True)
    # Register dispatchers for single functions
    server.registerFunction(stats, path='/api', dispatcherBackend='simple')

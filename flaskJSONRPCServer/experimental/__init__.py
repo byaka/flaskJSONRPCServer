@@ -42,52 +42,51 @@ class moreAsync:
       self._newMethod=newMethod
 
    def overload(self, server):
-      if not server.settings.gevent: return
+      if not server.settings.gevent: return # not needed, requests processed in native threads
       # add link to server
       if self.server is None: self.server=server
       # add backup for old methods
       if not hasattr(self.server, '_moreAsync_backup'): setattr(self.server, '_moreAsync_backup', {})
-      # backup old method
       self.server._moreAsync_backup[self.method]=getattr(server, self.method)
       # overload method
       setattr(server, self.method, self.wrapper)
 
    def wrapper(self, data):
       # calc size
-      size=self.getSize(data) if self.server._isFunction(self.getSize) else 0
+      size=self.getSize(data) if self.server._isFunction(self.getSize) else self.getSize
       # if size lower then minSize, call original method
-      if size is not None and size<self.minSize: return self.server._moreAsync_backup[self.method](data)
-      # create tmp result
-      cId=self.server._randomEx(99999, self.result.keys())
-      self.result[cId]=False
-      # run in native thread and wait result
-      self.server._thread(self.newMethod, args=[cId, data, size], forceNative=True)
-      while self.result[cId] is False: self.server._sleep(self.minSleep)
-      res=self.result[cId]
-      del self.result[cId]
-      return res
+      if size and size<self.minSize:
+         return self.server._moreAsync_backup[self.method](data)
+      #
+      return self.server.callAsync(self.newMethod, args=[data, size], sleepTime=self.minSleep)
 
-   def newMethod(self, cId, data, size):
+   def newMethod(self, data, size):
       try:
-         # print '>>>>>>MOREASYNC %s start <%s>, size %smb'%(self.method, cId, round(size/1024.0/1024.0, 2))
          mytime=self.server._getms()
          if self.server._isFunction(self._newMethod):
-            self.result[cId]=self._newMethod(data, self)
+            res=self._newMethod(data, self)
          else:
-            self.result[cId]=self.server._moreAsync_backup[self.method](data)
+            res=self.server._moreAsync_backup[self.method](data)
          speed=self.server._getms()-mytime
          self.speedStats[round(size/1024.0/1024.0)]=speed
-         # print '>>>>>>MOREASYNC %s end <%s>, time %ss'%(self.method, cId, round(speed/1000.0, 1))
+         self.server._logger(4, 'MOREASYNC_%s %smb, %ss'%(self.method, round(size/1024.0/1024.0, 2), round(speed/1000.0, 1)))
+         # print '>>>>>>MOREASYNC_%s %smb, %ss'%(self.method, round(size/1024.0/1024.0, 2), round(speed/1000.0, 1))
+         return res
       except Exception, e:
          self.server._throw('MOREASYNC_ERROR %s: %s'%(self.method, e))
 
 moreAsync_methods={
    '_compressGZIP': {'minSize':1*1024*1024},
-   '_sha256': {'minSize':200*1024*1024},
-   '_sha1': {'minSize':300*1024*1024}
+   '_uncompressGZIP': {'minSize':1*1024*1024},
+   '_sha256': {'minSize':100*1024*1024},
+   '_sha1': {'minSize':100*1024*1024}
 }
 
 asyncJSON_delimeter=re.compile('(,|\[|\]|{|}|:)')
+asyncJSON_limits={
+   'dumps':1*1024*1024,
+   'loads':1*1024*1024
+}
 
 def asyncJSON_dumps(data, cb=None, maxProcessTime=0.3):
    #from globals() to locals()
@@ -358,9 +357,22 @@ def _patchServer(server):
    if use_ujson:
       try:
          import ujson
+         server._jsonBackend_backup=server.jsonBackend
+         def tFunc_dumps(data, server=server, **kwargs):
+            try: return ujson.dumps(data)
+            except Exception, e:
+               if str(e)=='long too big to convert':
+                  return server._jsonBackend_backup.dumps(data, **kwargs)
+               raise
+         def tFunc_loads(data, server=server, **kwargs):
+            try: return ujson.loads(data)
+            except Exception, e:
+               if str(e)=='Value is too big!':
+                  return server._jsonBackend_backup.loads(data, **kwargs)
+               raise
          server.jsonBackend=magicDict({
-            'dumps': lambda data, **kwargs: ujson.dumps(data),
-            'loads': lambda data, **kwargs: ujson.loads(data)
+            'dumps': tFunc_dumps,
+            'loads': tFunc_loads
          })
       except ImportError: pass
    # use asyncJSON
@@ -368,23 +380,21 @@ def _patchServer(server):
       server._asyncJSON_backup=server.jsonBackend
       def tFunc_dumps(data, server=server, **kwargs):
          size=sys.getsizeof(data)
-         if size is not None and size<1*1024*1024:
+         if size is not None and size<asyncJSON_limits['dumps']:
             return server._asyncJSON_backup.dumps(data)
-         # print '>>>>>>ASYNCJSON dumps start, size %smb'%(round(size/1024.0/1024.0, 2))
          mytime=server._getms()
          res=asyncJSON_dumps(data, maxProcessTime=0.1, cb=lambda *args:server._sleep(0.001))
          speed=server._getms()-mytime
-         # print '>>>>>>ASYNCJSON dumps end, time %ss'%(round(speed/1000.0, 1))
+         server._logger(4, 'asyncJSON_dumps: %smb, %ss'%(round(size/1024.0/1024.0, 2), round(speed/1000.0, 1)))
          return res
       def tFunc_loads(data, server=server, **kwargs):
          size=sys.getsizeof(data)
-         if size is not None and size<10*1024*1024:
+         if size is not None and size<asyncJSON_limits['loads']:
             return server._asyncJSON_backup.loads(data)
-         # print '>>>>>>ASYNCJSON loads start, size %smb'%(round(size/1024.0/1024.0, 2))
          mytime=server._getms()
          res=asyncJSON_loads(data, maxProcessTime=0.1, cb=lambda:server._sleep(0.001))
          speed=server._getms()-mytime
-         # print '>>>>>>ASYNCJSON loads end, time %ss'%(round(speed/1000.0, 1))
+         server._logger(4, 'asyncJSON_loads: %smb, %ss'%(round(size/1024.0/1024.0, 2), round(speed/1000.0, 1)))
          return res
       server.jsonBackend=magicDict({
          'dumps': tFunc_dumps,

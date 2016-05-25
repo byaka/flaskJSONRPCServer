@@ -24,7 +24,10 @@ def Process(target, args=(), kwargs={}, name=None): # daemon=None
    # check if gevent availible
    try: _tryGevent()
    except ValueError:
+      print 'Gevent not founded, switching to native'
       return multiprocessing.Process(target=target, args=args, kwargs=kwargs, name=name)
+   if int(gevent.__version__[0])<1:
+      raise NotImplementedError('Gmultiprocessing supports only gevent>=1.0, your version %s'%gevent.__version__)
    if not isinstance(args, tuple):
       raise TypeError('<args> must be a tuple')
    if not isinstance(kwargs, dict):
@@ -67,6 +70,7 @@ class _GProcess(multiprocessing.Process):
    del mp_Popen
 
    def start(self):
+      _tryGevent()
       # Start grabbing SIGCHLD within libev event loop.
       gevent.get_hub().loop.install_sigchld()
       # Run new process (based on `fork()` on POSIX-compliant systems).

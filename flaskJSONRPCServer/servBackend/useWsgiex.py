@@ -1,5 +1,5 @@
 """
-
+This module provide Serving backend, that use <wsgiex>.
 """
 
 from ..utils import magicDict
@@ -61,7 +61,9 @@ class servBackend:
    def start(self, bindAdress, wsgiApp, server, joinLoop):
       if not hasattr(server, '_server'): server._server=[]
       if not hasattr(server, '_serverThread'): server._serverThread=[]
-      s=self.create(bindAdress, wsgiApp, log=server.setts.debug, threaded=True, useGevent=server.setts.gevent, sslArgs=server.setts.ssl, backlog=server.setts.backlog)
+      if not server._isTuple(bindAdress) and not server._isArray(bindAdress): backlog=None
+      else: backlog=server.setts.backlog
+      s=self.create(bindAdress, wsgiApp, log=server.setts.debug, threaded=True, useGevent=server.setts.gevent, sslArgs=server.setts.ssl, backlog=backlog)
       sThread=server._thread(s.serve_forever)
       server._server.append(s)
       server._serverThread.append(sThread)

@@ -7,6 +7,8 @@ __ver_patch__ = 2
 __ver_sub__ = ""
 __version__ = "%d.%d.%d" % (__ver_major__, __ver_minor__, __ver_patch__)
 """
+This library is an extended implementation of server for JSON-RPC protocol. It supports only json-rpc 2.0 specification for now, which includes batch submission, keyword arguments, notifications, etc.
+
 :authors: John Byaka
 :copyright: Copyright 2016, Buber
 :license: Apache License 2.0
@@ -26,7 +28,7 @@ __version__ = "%d.%d.%d" % (__ver_major__, __ver_minor__, __ver_patch__)
    limitations under the License.
 """
 
-import sys, inspect, decimal, random, json, datetime, time, os, zipfile, imp, urllib2, hashlib, threading, gc
+import sys, inspect, decimal, random, json, datetime, time, os, zipfile, imp, hashlib, threading, gc, socket
 from types import InstanceType, IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, ModuleType, FunctionType
 from cStringIO import StringIO
 from gzip import GzipFile
@@ -35,6 +37,8 @@ request=None
 Response=None
 gevent=None
 geventMonkey=None
+geventSocket=None
+geventFileObjectThread=None
 
 from utils import magicDict, virtVar, deque2, console
 
@@ -78,11 +82,14 @@ class flaskJSONRPCServer:
       # Flask imported here for avoiding error in setup.py if Flask not installed yet
       global Flask, request, Response
       from flask import Flask, request, Response
+      self._pid=os.getpid()
+      self._console=console
+      # prepare speedStats
+      self.speedStats={}
+      self.speedStatsMax={}
+      # tweak descriptor's limit
       self._tweakLimit(tweakDescriptors)
-      self.name=name or self._randomEx(9999999, pref='flaskJSONRPCServer<', suf='>')
-      self.flaskAppName=self.name
-      self.version=__version__
-      self.servBackend=None
+      # init settings
       self.settings=magicDict({
          'multipleAdress':multipleAdress,
          'ip':[],
@@ -114,6 +121,11 @@ class flaskJSONRPCServer:
          'backlog':10*1000,
          'magicVarForDispatcher':magicVarForDispatcher
       })
+      self.setts=self.settings # backward compatible
+      # set name
+      self.name=name or self._randomEx(pref='flaskJSONRPCServer<', suf='>')
+      self.flaskAppName=self.name
+      self.version=__version__
       # set adress
       bindAdress=bindAdress if multipleAdress else [bindAdress]
       for bind in bindAdress:
@@ -128,9 +140,8 @@ class flaskJSONRPCServer:
          for k, v in tArr.iteritems():
             self.settings[k].append(v)
       # other
-      self.setts=self.settings # backward compatible
+      self.servBackend=None
       self.locked=False
-      self._pid=os.getpid()
       self._parentModule=None
       self._findParentModule()
       self._werkzeugStopToken=''
@@ -143,9 +154,7 @@ class flaskJSONRPCServer:
       self.pathsDef=['/<path>/', '/<path>', '/<path>/<method>/', '/<path>/<method>']
       self.routes={}
       self.fixJSON=self._fixJSON
-      # prepare speedStats
-      self.speedStats={}
-      self.speedStatsMax={}
+      # prepare connPerMinute
       self.connPerMinute=magicDict({
          'nowMinute':0, 'count':0, 'oldCount':0, 'maxCount':0, 'minCount':0,
          'history1':deque2([], 9999),
@@ -242,13 +251,15 @@ class flaskJSONRPCServer:
          self.flaskApp.add_url_rule(rule=s, view_func=h, methods=methods, strict_slashes=False)
 
    def _tryGevent(self):
-      global gevent, geventMonkey
-      if gevent and geventMonkey: return False
+      global gevent, geventMonkey, geventSocket, geventFileObjectThread
+      if gevent and geventMonkey and geventSocket and geventFileObjectThread: return False
       try:
          import gevent
          from gevent import monkey as geventMonkey
+         from gevent import socket as geventSocket
+         from gevent.fileobject import FileObjectThread as geventFileObjectThread
          return True
-      except ImportError: self._throw('gevent not found')
+      except ImportError, e: self._throw('gevent not found: %s'%e)
 
    def _import(self, modules, scope=None, forceDelete=True):
       """
@@ -371,11 +382,14 @@ class flaskJSONRPCServer:
       """
       mytime=self._getms()
       pid=os.getpid() if pid is None else pid
-      data=None
+      f=None
       res=magicDict({})
       try:
-         data=open('/proc/%s/status'%pid)
-         for s in data:
+         f=open('/proc/%s/status'%pid)
+         if self.settings.gevent:
+            self._tryGevent()
+            f=geventFileObjectThread(f)
+         for s in f:
             parts=s.split()
             key=parts[0][2:-1].lower()
             if key=='peak': res['peak']=int(parts[1])
@@ -383,8 +397,7 @@ class flaskJSONRPCServer:
       except Exception, e:
          self._logger(2, "Can't count memory for PID %s: %s"%(pid, e))
          res=None
-      finally:
-         if data is not None: data.close()
+      if f is not None: f.close()
       self._speedStatsAdd('countMemory', self._getms()-mytime)
       return res
 
@@ -448,30 +461,36 @@ class flaskJSONRPCServer:
 
    def _isNum(self, var): return isinstance(var, (int, float, long, complex, decimal.Decimal))
 
-   def _fileGet(self, fName, method='r'):
+   def _fileGet(self, fName, mode='r'):
       """
-      This method open file and read content in mode <method>, if file is archive then open it and find file with name <method>.
+      This method open file and read content in mode <mode>, if file is archive then open it and find file with name <mode>.
 
       :param str fName: Path to file.
-      :param str method: Read-mode or file name.
+      :param str mode: Read-mode or file name.
       :return str:
       """
       fName=fName.encode('cp1251')
       if not os.path.isfile(fName): return None
       if zipfile.is_zipfile(fName):
-         c=zipfile.ZipFile(fName, method)
-         try: s=c.read(method)
+         c=zipfile.ZipFile(fName, mode)
+         try: s=c.read(mode)
          except Exception, e:
-            self._logger(1, 'Error fileGet', fName, ',', method, e)
+            self._logger(1, 'Error fileGet.zipfile', fName, ',', mode, e)
             s=None
          try: c.close()
          except: pass
       else:
+         f=None
          try:
-            with open(fName, method) as f: s=f.read()
+            f=open(fName, mode)
+            if self.settings.gevent:
+               self._tryGevent()
+               f=geventFileObjectThread(f)
+            s=f.read()
          except Exception, e:
-            self._logger(1, 'Error fileGet', fName, ',', method, e)
+            self._logger(1, 'Error fileGet', fName, ',', mode, e)
             s=None
+      if f is not None: f.close()
       return s
 
    def _fileWrite(self, fName, text, mode='w'):
@@ -484,8 +503,17 @@ class flaskJSONRPCServer:
       :param str mode: Write-mode.
       :return str:
       """
-      if not self._isString(text): text=repr(text)
-      with open(fName, mode) as f: f.write(text)
+      if not self._isString(text): text=self._serializeJSON(text)
+      f=None
+      try:
+         f=open(fName, mode)
+         if self.settings.gevent:
+            self._tryGevent()
+            f=geventFileObjectThread(f)
+         f.write(text)
+      except Exception, e:
+         self._logger(1, 'Error fileWrite', fName, ',', mode, e)
+      if f is not None: f.close()
 
    def _strGet(self, text, pref='', suf='', index=0, default=None):
       """
@@ -512,12 +540,13 @@ class flaskJSONRPCServer:
       if i2==-1: return default
       return text[i1+len(pref):i2]
 
-   def _sha1(self, text):
+   def _sha1(self, text, onError=None):
       """
       This method generate hash with sha1.
       Length of symbols = 40.
 
       :param str text:
+      :param func|any onError:
       :return str:
       """
       mytime=self._getms()
@@ -530,14 +559,16 @@ class flaskJSONRPCServer:
       except Exception, e:
          self._speedStatsAdd('sha1', self._getms()-mytime)
          self._logger(1, 'ERROR in _sha1():', e)
-         return str(random.randint(99999, 9999999))
+         if self._isFunction(onError): return onError(text)
+         return onError
 
-   def _sha256(self, text):
+   def _sha256(self, text, onError=None):
       """
       This method generate hash with sha1.
       Length of symbols = 64.
 
       :param str text:
+      :param func|any onError:
       :return str:
       """
       mytime=self._getms()
@@ -550,33 +581,44 @@ class flaskJSONRPCServer:
       except Exception, e:
          self._speedStatsAdd('sha256', self._getms()-mytime)
          self._logger(1, 'ERROR in _sha256():', e)
-         return str(random.randint(99999, 9999999))
+         if self._isFunction(onError): return onError(text)
+         return onError
 
-   def _randomEx(self, mult=262144, vals=None, pref='', suf='', soLong=3, cbSoLong=lambda s: s*2):
+   def _randomEx(self, mult=None, vals=None, pref='', suf='', soLong=0.1, cbSoLong=None):
       """
       This method generate random value from 0 to <mult> and add prefix and suffix.
       Also has protection against the repeating values and against recurrence (long generation).
 
-      :param int mult:
-      :param list vals: Blacklist of generated data.
+      :param int|None mult: If None, 'sys.maxint' will be used.
+      :param list|dict|str vals: Blacklist of generated data.
       :param str pref: Prefix.
       :param str suf: Suffix.
       :param int soLong: Max time in seconds for generating.
       :param func cbSoLong: This function will called if generating so long. It can return new <mult>. If return None, generating will be aborted.
       :return str: None if some problems or aborted.
       """
+      mult=mult or sys.maxint
+      mytime=self._getms()
+      mytime2=mytime
+      if cbSoLong is None:
+         def tFunc_soLong(s, *args):
+            self._sleep(0.1)
+            return s*2
+         cbSoLong=tFunc_soLong
       if vals is None: vals=[]
       s=pref+str(int(random.random()*mult))+suf
-      mytime=self._getms(False)
       while(s in vals):
          s=pref+str(int(random.random()*mult))+suf
-         if self._getms(False)-mytime>soLong: #защита от бесконечного цикла
-            mytime=self._getms(False)
+         # defence frome freeze
+         if (self._getms()-mytime2)/1000.0>soLong:
+            mytime2=self._getms()
             self._logger(2, 'randomEx: generating value so long!')
             if self._isFunction(cbSoLong):
                mult=cbSoLong(mult, vals, pref, suf)
-               if mult is None: return None
-            else: return None
+               if mult is not None: continue
+            self._speedStatsAdd('randomEx', self._getms()-mytime)
+            return None
+      self._speedStatsAdd('randomEx', self._getms()-mytime)
       return s
 
    def _throw(self, data):
@@ -592,6 +634,8 @@ class flaskJSONRPCServer:
       This method is wrapper above threading.Thread() or gevent.spawn(). Method swithing automatically, if <forceNative> is False. If it's True, always use unpatched threading.Thread(). Spawned threads always will be started like daemons.
 
       :param func target:
+      :param list args:
+      :param dict kwargs:
       :param bool forceNative:
       """
       args=args or []
@@ -616,11 +660,92 @@ class flaskJSONRPCServer:
             t=gevent.spawn(target, *args, **kwargs)
       return t
 
+   def callAsync(self, target, args=None, kwargs=None, sleepTime=0.45, sleepMethod=None, returnChecker=False):
+      """
+      This method allow to run heavy task asynchronously (without blocking server) when used with gevent, or simply in threaded-mode without gevent. It can return result of executed function, or function 'checker', that must be called for getting result (or happened errors).
+
+      :Attention:
+
+      It's not a silver bullet! This method incress perfomance only for limited cases, like executing C-code or perfoming IO-ops, not frendly for gevent. It really help with <pymysql> on large responses. In all other cases it not incress perfomance, but incress responsiveness of server. This mean, while some function executed in this way, server still availible and can process other requests.
+
+      :Attention:
+
+      This method use hack, that combine greenlets and native threads. It can really burst responsiveness of your server, but strongly recomended to use it only for functions, that don't do any "complicated" things, like working with shared memory, threads or server's instances.
+
+      :param func target:
+      :param list args:
+      :param dict kwargs:
+      :param float sleepTime:
+      :param func|None sleepMethod: If None, default will be used.
+      :param bool returnChecker: If True, return function, that must be called for get result.
+      :return any|func: Returns result of executed function or checker.
+      """
+      sleepMethod=sleepMethod or self._sleep
+      args=args or []
+      kwargs=kwargs or {}
+      mytime=self._getms()
+      # prepare queue
+      if not hasattr(self, '_callAsync_queue'): self._callAsync_queue={}
+      # generate unique id and workspace
+      cId=self._randomEx(vals=self._callAsync_queue)
+      self._callAsync_queue[cId]={'result':None, 'inProgress':True, 'error':None}
+      # init wrapper
+      def tFunc_wrapper(self, cId, target, args, kwargs):
+         try:
+            self._callAsync_queue[cId]['result']=target(*args, **kwargs)
+         except Exception, e:
+            self._callAsync_queue[cId]['error']=e
+         self._callAsync_queue[cId]['inProgress']=False
+      # call in native thread
+      self._thread(tFunc_wrapper, args=[self, cId, target, args, kwargs], forceNative=True)
+      # init checker
+      def tFunc_checker(mytime=None, __cId=cId):
+         if self._callAsync_queue[cId]['inProgress']: return False, None, None
+         else:
+            res=self._callAsync_queue[__cId]['result']
+            err=self._callAsync_queue[__cId]['error']
+            del self._callAsync_queue[__cId]
+            if mytime:
+               self._speedStatsAdd('callAsync', self._getms()-mytime)
+            return True, res, err
+      # return checker or get result
+      if returnChecker: return tFunc_checker
+      else:
+         # wait for completion and get result
+         while self._callAsync_queue[cId]['inProgress']: sleepMethod(sleepTime)
+         _, res, err=tFunc_checker(mytime)
+         # raise error or return result
+         if err: raise err
+         else: return res
+
+   def _socket(self):
+      """
+      This method returns correct socket class. For gevent return gevent's implementation.
+      """
+      if not self.settings.gevent:
+         return socket
+      else:
+         self._tryGevent()
+         return geventSocket
+
+   def _raw_input(self, msg=None, forceNative=False):
+      """
+      Non-blocking console input. Without gevent uses native raw_input.
+
+      :param str msg:
+      :param bool forceNative:
+      """
+      if forceNative or not self.settings.gevent: return raw_input(msg)
+      else:
+         if msg: sys.stdout.write(msg)
+         self._socket().wait_read(sys.stdin.fileno())
+         return sys.stdin.readline()
+
    def _sleep(self, s, forceNative=False):
       """
       This method is wrapper above time.sleep() or gevent.sleep(). Method swithing automatically, if <forceNative> is False. If it's True, always use unpatched time.sleep().
 
-      :param int s: Delay in milliseconds.
+      :param float s: Delay in seconds.
       :param bool forceNative:
       """
       if not self.settings.gevent:
@@ -1305,8 +1430,8 @@ class flaskJSONRPCServer:
          self._gcStats.processedDispatcherCount+=1
          _sleep=lambda s, forceNative=nativeThread: self._sleep(s, forceNative=forceNative)
          params={}
-         dispatcher=self.routes[path][data['method']].link
-         _args, _, _, _=inspect.getargspec(dispatcher)
+         currentDispatcher=self.routes[path][data['method']].link
+         _args, _, _, _=inspect.getargspec(currentDispatcher)
          _args=[s for i, s in enumerate(_args) if not(i==0 and s=='self')]
          if self._isDict(data['params']): params=data['params']
          elif self._isArray(data['params']): #convert *args to **kwargs
@@ -1327,15 +1452,18 @@ class flaskJSONRPCServer:
                'serverName':self.name,
                'servedBy':request.servedBy,
                'call':magicDict({
-                  'lock':lambda: self.lock(dispatcher=dispatcher),
-                  'unlock':lambda exclusive=False: self.unlock(dispatcher=dispatcher, exclusive=exclusive),
-                  'wait':lambda returnStatus=False: self.wait(dispatcher=dispatcher, sleepMethod=_sleep, returnStatus=returnStatus),
+                  'lockThis':lambda: self.lock(dispatcher=currentDispatcher),
+                  'unlockThis':lambda exclusive=False: self.unlock(dispatcher=currentDispatcher, exclusive=exclusive),
+                  'waitThis':lambda returnStatus=False: self.wait(dispatcher=currentDispatcher, sleepMethod=_sleep, returnStatus=returnStatus),
+                  'lock':lambda dispatcher=None: self.lock(dispatcher=dispatcher),
+                  'unlock':lambda dispatcher=None, exclusive=False: self.unlock(dispatcher=dispatcher, exclusive=exclusive),
+                  'wait':lambda dispatcher=None, returnStatus=False: self.wait(dispatcher=dispatcher, sleepMethod=_sleep, returnStatus=returnStatus),
                   'sleep':_sleep,
                   'log':self._logger
                }),
                'nativeThread':nativeThread if nativeThread is not None else not(self.setts.gevent),
                'notify':data['id'] is None,
-               'dispatcher':dispatcher,
+               'dispatcher':currentDispatcher,
                'path':path,
                'dispatcherName':data['method']
             }
@@ -1346,17 +1474,15 @@ class flaskJSONRPCServer:
                params[magicVarForDispatcher]=overload(params[magicVarForDispatcher])
             params[magicVarForDispatcher]=magicDict(params[magicVarForDispatcher])
          #locking
-         self.wait(dispatcher=dispatcher, sleepMethod=_sleep)
+         self.wait(dispatcher=currentDispatcher, sleepMethod=_sleep)
          #call dispatcher
          mytime=self._getms()
-         result=dispatcher(**params)
+         result=currentDispatcher(**params)
          self._speedStatsAdd('callDispatcher', self._getms()-mytime)
          self.processingDispatcherCount-=1
-         if self.settings.controlGC: self._controlGC() # call GC manually
          return True, params, result
       except Exception:
          self.processingDispatcherCount-=1
-         if self.settings.controlGC: self._controlGC() # call GC manually
          return False, params, self._getErrorInfo()
 
    def _controlGC(self, force=False):
@@ -1373,7 +1499,6 @@ class flaskJSONRPCServer:
          self._gcStats.processedDispatcherCount=0
          if not force: return
       # check
-      m1=self._countMemory()
       mytime=self._getms(False)
       if not force:
          if not self._gcStats.lastTime: return
@@ -1382,6 +1507,7 @@ class flaskJSONRPCServer:
             self._gcStats.processedDispatcherCount<self.settings.controlGC_everyDispatcherCount: return
       # collect garbage and reset stats
       mytime=self._getms()
+      m1=self._countMemory()
       s=gc.collect()
       m2=self._countMemory()
       if s:
@@ -1504,14 +1630,13 @@ class flaskJSONRPCServer:
       # processing request
       try:
          res=self._requestProcess(path, method)
-         if self.settings.controlGC: self._controlGC() # call GC manually
       except Exception:
          s=self._getErrorInfo()
          self._logger(1, 'ERROR processing request: %s'%(s))
-         if self.settings.controlGC: self._controlGC() # call GC manually
          res=Response(status=500, response=s)
       self.processingRequestCount-=1
       if self.settings.blocking: self._deepUnlock()
+      if self.settings.controlGC: self._controlGC() # call GC manually
       return res
 
    def _requestProcess(self, path, method):
@@ -1538,11 +1663,23 @@ class flaskJSONRPCServer:
       allowCompress=self.setts.allowCompress
       mimeType=self._calcMimeType(request)
       servedBy=request.__dict__['environ'].get('__flaskJSONRPCServer_binded', (None, None, None))
-      self._logger(4, 'RAW_REQUEST:', request.url, request.method, request.get_data())
+      # get post data
+      data=None
+      dataPrint=None
+      if request.method=='POST':
+         data=request.get_data()
+         # decompress if needed
+         if 'gzip' in request.headers.get('Content-Encoding', '').lower():
+            self._logger(4, 'COMPRESSED_REQUEST: %skb'%round(sys.getsizeof(data)/1024.0, 2))
+            data=self._uncompressGZIP(data)
+         # prepare for printing
+         if len(data)>100: dataPrint=data[:100]+'...'
+      self._logger(4, 'RAW_REQUEST:', request.url, request.method, dataPrint or data)
+      # AUTH
       if self._isFunction(self.settings.auth):
          if self.settings.auth(self, path, self._copyRequestContext(request), method) is not True:
             self._speedStatsAdd('generateResponse', self._getms()-mytime)
-            self._logger(2, 'ACCESS_DENIED:', request.url, request.method, request.get_data())
+            self._logger(3, 'ACCESS_DENIED:', request.url, request.method, dataPrint or data)
             return Response(status=403)
       # CORS
       if self.setts.CORS:
@@ -1556,8 +1693,7 @@ class flaskJSONRPCServer:
       if request.method=='OPTIONS':
          self._logger(4, 'REQUEST_TYPE == OPTIONS')
       elif request.method=='POST': #JSONRPC
-         data=request.get_data()
-         self._logger(4, 'REQUEST:', data)
+         self._logger(4, 'REQUEST:', dataPrint or data)
          status, dataInList=self._parseRequest(data)
          if not status: #error of parsing
             error={"code": -32700, "message": "Parse error"}
@@ -1577,7 +1713,7 @@ class flaskJSONRPCServer:
                   error.append({"code": -32601, "message": "Method not found", "id":dataIn['id']})
                else: #process correct request
                   # generate unique id
-                  uniqueId='--'.join([dataIn['method'], str(dataIn['id']), str(random.randint(0, 999999)), str(random.randint(0, 999999)), str(request.environ.get('HTTP_X_REAL_IP', request.remote_addr) or ''), self._sha1(request.get_data()), str(self._getms())])
+                  uniqueId='--'.join([dataIn['method'], str(dataIn['id']), self._randomEx(), self._randomEx(), str(request.environ.get('HTTP_X_REAL_IP', request.remote_addr) or ''), self._sha1(data), str(self._getms())])
                   # select dispatcher
                   dispatcher=self.routes[path][dataIn['method']]
                   # copy request's context
@@ -1587,7 +1723,7 @@ class flaskJSONRPCServer:
                   if dataIn['id'] is None: #notification request
                      execBackend=self.execBackend.get(dispatcher.notifBackendId, None)
                      if execBackend and hasattr(execBackend, 'add'):
-                        status, m=execBackend.add(uniqueId, path, dataIn, requestCopy)
+                        status, m, dataForBackend=execBackend.add(uniqueId, path, dataIn, requestCopy)
                         if not status:
                            self._logger(1, 'Error in notifBackend.add(): %s'%m)
                      else:
@@ -1596,12 +1732,12 @@ class flaskJSONRPCServer:
                      execBackend=self.execBackend.get(dispatcher.dispatcherBackendId, None)
                      if execBackend and hasattr(execBackend, 'add') and hasattr(execBackend, 'check'):
                         # copy request's context
-                        status, m=execBackend.add(uniqueId, path, dataIn, requestCopy)
+                        status, m, dataForBackend=execBackend.add(uniqueId, path, dataIn, requestCopy)
                         if not status:
                            self._logger(1, 'Error in dispatcherBackend.add(): %s'%m)
                            result='Error in dispatcherBackend.add(): %s'%m
                         else:
-                           status, params, result=execBackend.check(uniqueId)
+                           status, params, result=execBackend.check(uniqueId, dataForBackend)
                      else:
                         status, params, result=self._callDispatcher(uniqueId, path, dataIn, requestCopy)
                      if status:
@@ -1642,7 +1778,7 @@ class flaskJSONRPCServer:
             if 'jsonp' in params: del params['jsonp']
             dataIn={'method':method, 'params':params}
             # generate unique id
-            uniqueId='--'.join([dataIn['method'], str(random.randint(0, 999999)), str(random.randint(0, 999999)), str(request.environ.get('HTTP_X_REAL_IP', request.remote_addr) or ''), self._sha1(request.get_data()), str(self._getms())])
+            uniqueId='--'.join([dataIn['method'], self._randomEx(), self._randomEx(), str(request.environ.get('HTTP_X_REAL_IP', request.remote_addr) or ''), str(self._getms())])
             # <id> passed like for normal request
             dataIn={'method':method, 'params':params, 'id':uniqueId}
             # select dispatcher
@@ -1653,12 +1789,12 @@ class flaskJSONRPCServer:
             # select backend for executing
             execBackend=self.execBackend.get(dispatcher.dispatcherBackendId, None)
             if execBackend and hasattr(execBackend, 'add') and hasattr(execBackend, 'check'):
-               status, m=execBackend.add(uniqueId, path, dataIn, requestCopy, isJSONP=jsonpCB)
+               status, m, dataForBackend=execBackend.add(uniqueId, path, dataIn, requestCopy, isJSONP=jsonpCB)
                if not status:
                   self._logger(1, 'Error in dispatcherBackend.add(): %s'%m)
                   result='Error in dispatcherBackend.add(): %s'%m
                else:
-                  status, params, result=execBackend.check(uniqueId)
+                  status, params, result=execBackend.check(uniqueId, dataForBackend)
             else:
                status, params, result=self._callDispatcher(uniqueId, path, dataIn, requestCopy, isJSONP=jsonpCB)
             if status:
@@ -1850,105 +1986,6 @@ class flaskJSONRPCServer:
             return __wsgi(environ, start_response)
          # start
          self.servBackend.start(bindAdress, wsgiWrapped, self, joinLoop=(joinLoop and i+1==len(self.setts.ip)))
-      # if self.setts.gevent and self.settings.useWsgiex!='force':
-      #    # serving with gevent's pywsgi
-      #    self.servBackend='pywsgi'
-      #    self._logger(3, 'Server running as gevent.pywsgi..')
-      #    from gevent.pywsgi import WSGIServer
-      #    from gevent.pool import Pool
-      #    if self.setts.ssl: from gevent import ssl
-      #    self._serverPool=[]
-      #    logType=('default' if self.setts.debug else None)
-      #    for i in xrange(len(self.setts.ip)):
-      #       pool=Pool(None)
-      #       self._serverPool.append(pool)
-      #       bindAdress=self.setts.socket[i] if self.setts.socket[i] else (self.setts.ip[i], self.setts.port[i])
-      #       # wrapping WSGI for detecting adress
-      #       if self.setts.socket[i]:
-      #          __flaskJSONRPCServer_binded=(True, self.setts.socketPath[i], self.setts.socket[i])
-      #       else:
-      #          __flaskJSONRPCServer_binded=(False, self.setts.ip[i], self.setts.port[i])
-      #       def wsgiWrapped(environ, start_response, __flaskJSONRPCServer_binded=__flaskJSONRPCServer_binded, __wsgi=wsgi):
-      #          environ['__flaskJSONRPCServer_binded']=__flaskJSONRPCServer_binded
-      #          return __wsgi(environ, start_response)
-      #       # init wsgi backend
-      #       if self.setts.ssl:
-      #          # from functools import wraps
-      #          # def sslwrap(func):
-      #          #    @wraps(func)
-      #          #    def bar(*args, **kw):
-      #          #       kw['ssl_version']=ssl.PROTOCOL_TLSv1
-      #          #       return func(*args, **kw)
-      #          #    return bar
-      #          # ssl.wrap_socket=sslwrap(ssl.wrap_socket)
-      #          server=WSGIServer(bindAdress, wsgiWrapped, log=logType, spawn=pool, backlog=10*1000, keyfile=self.setts.ssl[0], certfile=self.setts.ssl[1], ssl_version=ssl.PROTOCOL_TLSv1_2) #ssl.PROTOCOL_SSLv23
-      #       else:
-      #          server=WSGIServer(bindAdress, wsgiWrapped, log=logType, spawn=pool, backlog=10*1000)
-      #       self._server.append(server)
-      #       # start wsgi backend
-      #       try:
-      #          if joinLoop and i+1==len(self.setts.ip): server.serve_forever()
-      #          else: server.start()
-      #       except KeyboardInterrupt: pass
-      # elif self.settings.useWsgiex:
-      #    # serving with wsgiex
-      #    self.servBackend='wsgiex'
-      #    self._logger(3, 'Server running as wsgiex..')
-      #    self._serverThread=[]
-      #    for i in xrange(len(self.setts.ip)):
-      #       bindAdress=self.setts.socket[i] if self.setts.socket[i] else (self.setts.ip[i], self.setts.port[i])
-      #       # wrapping WSGI for detecting adress
-      #       if self.setts.socket[i]:
-      #          __flaskJSONRPCServer_binded=(True, self.setts.socketPath[i], self.setts.socket[i])
-      #       else:
-      #          __flaskJSONRPCServer_binded=(False, self.setts.ip[i], self.setts.port[i])
-      #       def wsgiWrapped(environ, start_response, __flaskJSONRPCServer_binded=__flaskJSONRPCServer_binded, __wsgi=wsgi):
-      #          environ['__flaskJSONRPCServer_binded']=__flaskJSONRPCServer_binded
-      #          return __wsgi(environ, start_response)
-      #       # init and start wsgi backend
-      #       server=servBackendCollection.wsgiex(bindAdress, wsgiWrapped, log=self.setts.debug, threaded=True, useGevent=self.setts.gevent, sslArgs=self.setts.ssl, backlog=10*1000)
-      #       serverThread=self._thread(server.serve_forever)
-      #       self._server.append(server)
-      #       self._serverThread.append(serverThread)
-      #       if joinLoop and i+1==len(self.setts.ip):
-      #          try:
-      #             while True: self._sleep(1000)
-      #          except KeyboardInterrupt: pass
-      # else:
-         # serving with werkzeug
-         # if any(self.setts.socket):
-         #    self._throw('Serving on raw-socket not supported without gevent')
-         # self.servBackend='werkzeug'
-         # self._logger(3, 'Server running as werkzeug..')
-         # from werkzeug.serving import make_server as werkzeug
-         # if not self.setts.debug:
-         #    import logging
-         #    log=logging.getLogger('werkzeug')
-         #    log.setLevel(logging.ERROR)
-         # sslContext=None
-         # if self.setts.ssl:
-         #    import ssl
-         #    sslContext=ssl.SSLContext(ssl.PROTOCOL_TLSv1_2) #SSL.Context(SSL.SSLv23_METHOD)
-         #    sslContext.load_cert_chain(self.setts.ssl[1], self.setts.ssl[0])
-         # self._serverThread=[]
-         # for i in xrange(len(self.setts.ip)):
-         #    # wrapping WSGI for detecting adress
-         #    if self.setts.socket[i]:
-         #       __flaskJSONRPCServer_binded=(True, self.setts.socketPath[i], self.setts.socket[i])
-         #    else:
-         #       __flaskJSONRPCServer_binded=(False, self.setts.ip[i], self.setts.port[i])
-         #    def wsgiWrapped(environ, start_response, __flaskJSONRPCServer_binded=__flaskJSONRPCServer_binded, __wsgi=wsgi):
-         #       environ['__flaskJSONRPCServer_binded']=__flaskJSONRPCServer_binded
-         #       return __wsgi(environ, start_response)
-         #    # init and start wsgi backend
-         #    server=werkzeug(self.setts.ip[i], self.setts.port[i], wsgiWrapped, threaded=not(self.setts.blocking), ssl_context=sslContext)
-         #    serverThread=self._thread(server.serve_forever)
-         #    self._server.append(server)
-         #    self._serverThread.append(serverThread)
-         #    if joinLoop and i+1==len(self.setts.ip):
-         #       try:
-         #          while True: self._sleep(1000)
-         #       except KeyboardInterrupt: pass
 
    def _stopExecBackends(self, timeout=20, processingDispatcherCountMax=0):
       """
@@ -2006,21 +2043,6 @@ class flaskJSONRPCServer:
          try:
             self.servBackend.stop(s, i, self, timeout=timeout-(self._getms()-mytime)/1000.0)
          except Exception, e: withError.append(e)
-      # if self.servBackend=='pywsgi':
-      #    for s in self._server:
-      #       try:
-      #          s.stop(timeout=timeout-(self._getms()-mytime)/1000.0)
-      #       except Exception, e: withError.append(e)
-      # elif self.servBackend=='werkzeug':
-      #    for i in xrange(len(self._server)):
-      #       try:
-      #          self._server[i]._BaseServer__shutdown_request=True
-      #          self._server[i]._BaseServer__serving=False
-      #          self._serverThread[i].join(timeout-(self._getms()-mytime)/1000.0)
-      #       except Exception, e: withError.append(e)
-      # else:
-      #    withError.append('Stopping not provided for servBackend "%s"'%self.servBackend)
-      # check is errors happened
       if withError:
          self._deepUnlock()
          self._throw('\n'.join(withError))

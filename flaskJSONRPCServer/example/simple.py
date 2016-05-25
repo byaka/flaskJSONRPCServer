@@ -18,10 +18,6 @@ def echo(data='Hello world!'):
    return data
 echo._alias='helloworld' #setting alias for method
 
-def myip(_connection=None):
-   # Return client's IP
-   return 'Hello, %s!'%(_connection.ip)
-
 def setcookie(_connection=None):
    # Set cookie to client
    print _connection.cookies
@@ -30,7 +26,7 @@ def setcookie(_connection=None):
 
 def stats(_connection=None):
    #return server's speed stats
-   return _connection.server.stats(inMS=True) #inMS=True return stats in milliseconds
+   return _connection.server.stats(inMS=False) #inMS=True return stats in milliseconds
 
 def big(_connection=None):
    _connection.allowCompress=True #allow compression for this method only
@@ -98,18 +94,20 @@ big._alias=['bigdata', 'compressed'] #setting alias for method
 if __name__=='__main__':
    print 'Running api..'
    # Creating instance of server
-   #    <blocking>         switch server to sync mode when <gevent> is False
+   #    <blocking>         switch server to one-request-per-time mode
    #    <cors>             switch auto CORS support
-   #    <gevent>           switch to using Gevent as backend
-   #    <debug>            switch to logging connection's info from Flask
-   #    <log>              switch to logging debug info from flaskJSONRPCServer
+   #    <gevent>           switch to patching process with Gevent
+   #    <debug>            switch to logging connection's info from serv-backend
+   #    <log>              set logging level (0-critical, 1-errors, 2-warnings, 3-info, 4-debug)
    #    <fallback>         switch auto fallback to JSONP on GET requests
    #    <allowCompress>    switch auto compression
    #    <compressMinSize>  set min limit for compression
-   #    <tweakDescriptors> set descriptor's limit for server
-   #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
-   #    <notifBackend>     set backend for Notify-requests
-   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=False, debug=False, log=3, fallback=True, allowCompress=False, compressMinSize=1024, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000])
+   #    <tweakDescriptors> set file-descriptor's limit for server (useful on high-load servers)
+   #    <jsonBackend>      set JSON-backend. Auto fallback to native when problems
+   #    <notifBackend>     set exec-backend for Notify-requests
+   #    <servBackend>      set serving-backend ('pywsgi', 'werkzeug', 'wsgiex' or 'auto'). 'auto' is more preffered
+   #    <experimental>     switch using of experimental perfomance-patches
+   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=False, debug=False, log=3, fallback=True, allowCompress=False, compressMinSize=100*1024, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000], servBackend='auto')
    # Register dispatcher for all methods of instance
    server.registerInstance(mySharedMethods(), path='/api')
    # same name, but another path
@@ -117,9 +115,10 @@ if __name__=='__main__':
    # Register dispatchers for single functions
    server.registerFunction(setcookie, path='/api')
    server.registerFunction(echo, path='/api')
-   server.registerFunction(myip, path='/api')
    server.registerFunction(big, path='/api')
    server.registerFunction(stats, path='/api')
+   # Register dispatchers for lambda
+   server.registerFunction(lambda _connection=None: 'Hello, %s!'%(_connection.ip), name='myip', path='/api')
    # Run server
    server.serveForever()
    # Now you can access this api by path http://127.0.0.1:7001/api for JSON-RPC requests

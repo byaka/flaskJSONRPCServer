@@ -4,26 +4,48 @@ import sys, time, random, os
 from flaskJSONRPCServer import flaskJSONRPCServer
 from flaskJSONRPCServer.execBackend import execBackend_parallelWithSocket
 
-def slowTest(_connection=None):
+def slowTest(__=None):
    s=2
    for i in xrange(30):
       s=s**2
-   _connection.call.log('>> slowTest complited!')
+   __.call.log('>> slowTest complited!')
    return 'ok'
 
-def sleepTest(_connection=None):
-   _connection.call.log('>> before sleep')
-   _connection.call.sleep(5)
-   _connection.call.log('>> after sleep')
+def bigData():
+   return 'test'*(10*1024*1024)
+
+def testLong():
+   # throw exception, see https://github.com/byaka/flaskJSONRPCServer/issues/78
+   return 2**64
+
+def sleepTest(__=None):
+   __.call.log('>> before sleep')
+   __.call.sleep(5)
+   __.call.log('>> after sleep')
    return 'ok'
 
-def echo(data='Hello world', _connection=None):
-   if _connection.notify: _connection.call.log(data)
+def echo(data='Hello world', __=None):
+   if __.notify: __.call.log(data)
    return data
 
-def stats(_connection=None):
+def stats(__=None):
    #return server's speed stats
-   return _connection.server.stats(inMS=False) #inMS=True return stats in milliseconds
+   return __.server.stats(inMS=False) #inMS=True return stats in milliseconds
+
+class testLocking:
+   def lockFor(self, n=5, andUnlockEcho=False, __=None):
+      __.call.lock()
+      if andUnlockEcho:
+         #but unlock 'echo' dispatcher
+         __.call.unlock(dispatcher=echo, exclusive=True)
+      __.call.log('LOCKED!')
+      #now all server locked
+      __.call.sleep(n)
+      __.call.unlock()
+      if andUnlockEcho:
+         #return to normal state
+         __.call.unlock(dispatcher=echo)
+      __.call.log('UNLOCKED!')
 
 if __name__=='__main__':
    print 'Running api..'
@@ -35,24 +57,29 @@ if __name__=='__main__':
    myExecBackend=execBackend_parallelWithSocket(id='myExecBackend', saveResult=True, poolSize=2)
    myNotifBackend=execBackend_parallelWithSocket(id='myNotifBackend', saveResult=False, poolSize=2)
    # Creating instance of server
-   #    <blocking>         switch server to sync mode when <gevent> is False
+   #    <blocking>         switch server to one-request-per-time mode
    #    <cors>             switch auto CORS support
-   #    <gevent>           switch to using Gevent as backend
-   #    <debug>            switch to logging connection's info from Flask
-   #    <log>              switch to logging debug info from flaskJSONRPCServer
+   #    <gevent>           switch to patching process with Gevent
+   #    <debug>            switch to logging connection's info from serv-backend
+   #    <log>              set logging level (0-critical, 1-errors, 2-warnings, 3-info, 4-debug)
    #    <fallback>         switch auto fallback to JSONP on GET requests
    #    <allowCompress>    switch auto compression
    #    <compressMinSize>  set min limit for compression
-   #    <tweakDescriptors> set descriptor's limit for server
-   #    <jsonBackend>      set JSON backend. Auto fallback to native when problems
-   #    <notifBackend>     set backend for Notify-requests
-   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=3, fallback=True, allowCompress=False, jsonBackend='simplejson', tweakDescriptors=[1000, 1000], dispatcherBackend=myExecBackend, notifBackend=myNotifBackend, experimental=True)
+   #    <tweakDescriptors> set file-descriptor's limit for server (useful on high-load servers)
+   #    <jsonBackend>      set JSON-backend. Auto fallback to native when problems
+   #    <notifBackend>     set exec-backend for Notify-requests
+   #    <servBackend>      set serving-backend ('pywsgi', 'werkzeug', 'wsgiex' or 'auto'). 'auto' is more preffered
+   #    <experimental>     switch using of experimental perfomance-patches
+   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=3, fallback=True, allowCompress=False, jsonBackend='simplejson', tweakDescriptors=[1000, 1000], dispatcherBackend=myExecBackend, notifBackend=myNotifBackend, experimental=True, magicVarForDispatcher='__', servBackend='auto')
    # Register dispatchers for single functions
    server.registerFunction(stats, path='/api', dispatcherBackend='simple')
 
    server.registerFunction(slowTest, path='/api')
+   server.registerFunction(testLong, path='/api')
+   server.registerFunction(bigData, path='/api')
    server.registerFunction(sleepTest, path='/api')
    server.registerFunction(echo, path='/api')
+   server.registerInstance(testLocking(), path='/api')
    # Run server
    server.serveForever()
    # Now you can access this api by path http://127.0.0.1:7001/api for JSON-RPC requests

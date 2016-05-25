@@ -38,19 +38,22 @@ class execBackend:
    :param bool disableGeventInChild:
    """
 
-   def __init__(self, poolSize=1, importGlobalsFromParent=True, parentGlobals=None, sleepTime_resultCheck=0.1, sleepTime_emptyQueue=0.1, sleepTime_waitLock=0.75, sleepTime_lazyRequest=2*60*1000, sleepTime_checkPoolStopping=0.3, allowThreads=True, id='execBackend_parallelWithSocket', socketPath=None, saveResult=True, persistent_queueGet=True, useCPickle=False, disableGeventInChild=False):
+   def __init__(self, poolSize=1, importGlobalsFromParent=True, parentGlobals=None, sleepTime_resultCheck=0.1, sleepTime_emptyQueue=0.1, sleepTime_waitLock=0.75, sleepTime_lazyRequest=2*60*1000, sleepTime_checkPoolStopping=0.3, allowThreads=True, id='execBackend_parallelWithSocket', socketPath=None, saveResult=True, persistent_queueGet=True, persistent_waitLock=True, useCPickle=False, disableGeventInChild=False):
       self.settings=magicDict({
          'poolSize':poolSize,
          'sleepTime_resultCheck':sleepTime_resultCheck,
          'sleepTime_emptyQueue':sleepTime_emptyQueue,
+         'persistent_queueGet':persistent_queueGet,
          'sleepTime_waitLock':sleepTime_waitLock,
+         'persistent_waitLock':persistent_waitLock,
          'sleepTime_lazyRequest':sleepTime_lazyRequest,
          'sleepTime_checkPoolStopping':sleepTime_checkPoolStopping,
          'importGlobalsFromParent':importGlobalsFromParent,
          'allowThreads':allowThreads,
          'lazyRequestChunk':1000,
+         'allowCompress':None, # if None, auto select mode
+         'compressMinSize':1*1024*1024,
          'saveResult':saveResult,
-         'persistent_queueGet':persistent_queueGet,
          'useCPickle':useCPickle,
          'disableGeventInChild':disableGeventInChild,
          'importGlobalsFromParent_typeForEval':None,
@@ -68,6 +71,7 @@ class execBackend:
       self._forceStop=False
       self._jsonBackend=None
       if useCPickle:
+         #! предположительно использование cPickle вместе с experimental-patch поломает систему на больших пакетах
          #! try http://stackoverflow.com/a/15108940
          import cPickle
          self._jsonBackend=magicDict({
@@ -81,6 +85,8 @@ class execBackend:
          server._throw('ExecBackend "parallelWithSocket" not implemented for Werkzeug backend')
       # warnings
       if self.settings.useCPickle:
+         if server.settings.experimental:
+            server._logger(0, 'WARNING: cPickle backend not tested with experimental patch')
          server._logger(2, 'WARNING: cPickle is slow backend')
       # convert to tuple
       if self.settings.importGlobalsFromParent_typeForVarCheck is not None and not server._isTuple(self.settings.importGlobalsFromParent_typeForVarCheck):
@@ -88,7 +94,7 @@ class execBackend:
       # choise json-backend
       if self._jsonBackend is None: self._jsonBackend=server.jsonBackend
       # generate access token
-      self.token='--'.join([server._randomEx(999999) for i in xrange(30)])
+      self.token='--'.join([server._randomEx() for i in xrange(30)])
       # import parent's globals if needed
       if self.settings.importGlobalsFromParent:
          deniedNames=['__builtins__'] #! add other
@@ -112,21 +118,20 @@ class execBackend:
          self._pool.append(p)
          server._logger(4, 'Started child-process <%s>'%p._id)
       # create socket for API
-      from gevent import socket
+      sockClass=server._socket()
       for i, lPath in enumerate(listeners):
          # create listener
-         l=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+         l=sockClass.socket(sockClass.AF_UNIX, sockClass.SOCK_STREAM)
          l.bind(lPath)
-         l.listen(256)
+         l.listen(server.setts.backlog)
          listeners[i]=(lPath, l)
       # link to parentServer
       self._parentServer=server
       #select compression settings
-      allowCompress=False
-      compressMinSize=100*1024*1024
-      if server.settings.experimental and experimentalPack.use_moreAsync and '_compressGZIP' in experimentalPack.moreAsync_methods: allowCompress=True
+      self._allowCompress=self.settings.allowCompress
+      if self._allowCompress is None and server.settings.experimental and experimentalPack.use_moreAsync and '_compressGZIP' in experimentalPack.moreAsync_methods: self._allowCompress=True
       #start API on unix-socket
-      self._server=flaskJSONRPCServer(listeners, multipleAdress=True, blocking=False, cors=False, gevent=server.setts.gevent, debug=False, log=server.settings.log, fallback=False, allowCompress=allowCompress, compressMinSize=compressMinSize, jsonBackend=self._jsonBackend, tweakDescriptors=None, notifBackend='simple', dispatcherBackend='simple', experimental=server.settings.experimental, controlGC=False, name='API_of_execBackend<%s>'%self._id)
+      self._server=flaskJSONRPCServer(listeners, multipleAdress=True, blocking=False, cors=False, gevent=server.setts.gevent, debug=False, log=server.settings.log, fallback=False, allowCompress=self._allowCompress, compressMinSize=self.settings.compressMinSize, jsonBackend=self._jsonBackend, tweakDescriptors=None, notifBackend='simple', dispatcherBackend='simple', experimental=server.settings.experimental, controlGC=False, name='API_of_execBackend<%s>'%self._id)
       self._server.setts.antifreeze_batchMaxTime=1*1000
       self._server.setts.antifreeze_batchBreak=False
       self._server.setts.antifreeze_batchSleep=1
@@ -169,12 +174,12 @@ class execBackend:
       #callback for adding request to queue
       try:
          self.queue.append({'uniqueId':uniqueId, 'isJSONP':isJSONP, 'path':path, 'dataIn':dataIn, 'request':request, 'mytime':self._parentServer._getms()})
-         return True, len(self.queue)
+         return True, len(self.queue), None
       except Exception, e:
          print '!!! ERROR execBackend_parallelWithSocket.add', e
-         return None, str(e)
+         return None, str(e), None
 
-   def check(self, uniqueId):
+   def check(self, uniqueId, _):
       if not self.settings.saveResult: #! maybe this case must be error
          return None, None, '<saveResult> is False'
       mytime=self._parentServer._getms()
@@ -195,30 +200,31 @@ class execBackend:
    def sendRequest(self, path, method, params=None, notif=False):
       mytime=self._server._getms()
       if params is None: params=[]
+      headers={'Token':self.token, 'Accept-Encoding':'gzip'}
       if self._server._isArray(method): #always like notify-batch
          data=[{'jsonrpc': '2.0', 'method': v['method'], 'params':v['params']} for v in method]
       else:
          data={'jsonrpc': '2.0', 'method': method, 'params':params}
          if not notif: #like notif
-            data['id']=self._server._randomEx(9999999)
+            data['id']=self._server._randomEx()
       try: data=self._server._serializeJSON(data)
       except Exception, e:
          self._server._throw('Cant serialize JSON: %s'%(e))
-      if self._server.settings.gevent:
-         from gevent import socket as sockClass
-      else:
-         import socket as sockClass
+      if self._allowCompress and sys.getsizeof(data)>=self.settings.compressMinSize:
+         data=self._server._compressGZIP(data)
+         headers['Content-Encoding']='gzip'
+      sockClass=self._server._socket()
       _conn=self._conn if self._conn is not None else UnixHTTPConnection(self.socketPath, socketClass=sockClass)
       for i in xrange(10):
          try:
-            _conn.request('POST', path, data, {'Token':self.token, 'Accept-encoding':'gzip'})
+            _conn.request('POST', path, data, headers)
             if self._conn is not None: self._conn=_conn
             break
          except Exception, e:
-            print '!!', e
             self._server._sleep(1)
          _conn=UnixHTTPConnection(self.socketPath, socketClass=sockClass)
-      else: self._server._throw('Cant connect to backend-API:'%self.socketPath)
+      else:
+         self._server._throw('Cant connect to backend-API:'%self.socketPath)
       resp=_conn.getresponse()
       data2=resp.read()
       if notif or self._server._isArray(method):
@@ -270,17 +276,17 @@ class execBackend:
       self._serverOriginalMethods=magicDict({})
       #we need this dummy for some methods from it and there we store gevent's status
       self._server=flaskJSONRPCServer(['', ''], gevent=(not(self.settings.disableGeventInChild) and self.settings.allowThreads and self._parentServer.setts.gevent), log=self._parentServer.setts.log, jsonBackend=self._jsonBackend, tweakDescriptors=None, experimental=self._parentServer.settings.experimental, controlGC=self._parentServer.settings.controlGC)
+      #select compression settings
+      self._allowCompress=self.settings.allowCompress
+      if self._allowCompress is None and self._server.settings.experimental and experimentalPack.use_moreAsync and '_compressGZIP' in experimentalPack.moreAsync_methods: self._allowCompress=True
       # patching or un-patching (main program can patch themselve before execBackend will be started. in this case patched version of libs fall in child process)
       self._server._importAll(forceDelete=True, scope=globals())
+      # prepare connection for sendRequest
       if self.settings.allowThreads:
          # in threaded mode (also gevent) we can't use same socket for concurrent connections
          self._conn=None
       else:
-         if self._server.settings.gevent:
-            from gevent import socket as sockClass
-         else:
-            import socket as sockClass
-         self._conn=UnixHTTPConnection(self.socketPath, socketClass=sockClass)
+         self._conn=UnixHTTPConnection(self.socketPath, socketClass=self._server._socket())
       # create hashmap for parentGlobals
       self.parentGlobals_oldHash={}
       if self.settings.importGlobalsFromParent:
@@ -291,8 +297,8 @@ class execBackend:
       # overload some methods in parentServer (becouse _callDispatcher will be executed in his context)
       self.childDisableNotImplemented()
       self._parentServer.stats=lambda inMS=False: self.sendRequest('/parent', 'stats', [inMS])
-      self._parentServer.lock=lambda dispatcher=None: self.sendRequest('/parent', 'lock', [(None if dispatcher is None else dispatcher._id)])
-      self._parentServer.unlock=lambda dispatcher=None, exclusive=False: self.sendRequest('/parent', 'unlock', [(None if dispatcher is None else dispatcher._id), exclusive])
+      self._parentServer.lock=lambda dispatcher=None: self.sendRequest('/parent', 'lock', [(dispatcher._id if dispatcher else None)])
+      self._parentServer.unlock=lambda dispatcher=None, exclusive=False: self.sendRequest('/parent', 'unlock', [(dispatcher._id if dispatcher else None), exclusive])
       self._parentServer.wait=self.childWait
       self._parentServer._speedStatsAdd=self.childSpeedStatsAdd
       # also replace some methods to version from self._server
@@ -344,7 +350,7 @@ class execBackend:
       self._server.processingDispatcherCount+=1
       self._server._gcStats.processedDispatcherCount+=1
       p['request']=magicDict(p['request']) # _callDispatcher() work with this like object, not dict
-      status, params, result=self._parentServer._callDispatcher(p['uniqueId'], p['path'], p['dataIn'], p['request'], overload=self.childConnectionOverload, nativeThread=not(self._server.setts.gevent), isJSONP=p.get('isJSONP', False))
+      status, params, result=self._parentServer._callDispatcher(p['uniqueId'], p['path'], p['dataIn'], p['request'], overload=self.childMagicVarOverload, nativeThread=not(self._server.setts.gevent), isJSONP=p.get('isJSONP', False))
       if not self.settings.saveResult:
          self._server.processingDispatcherCount-=1
          return
@@ -352,15 +358,16 @@ class execBackend:
       #! #57 It must be on TYPE-based, not NAME-based
       convBlackList=['server', 'call', 'dispatcher']
       # convWhitelist=['cookies', 'cookiesOut', 'ip', 'notify', 'jsonp', 'path', 'parallelType', 'parallelPoolSize', 'headersOut', 'dispatcherName', 'headers', 'nativeThread', 'allowCompress']
-      if '_connection' in params:
-         params['_connection']=dict([(k,v) for k,v in params['_connection'].iteritems() if k not in convBlackList])
+      magicVarForDispatcher=self._parentServer.settings.magicVarForDispatcher
+      if magicVarForDispatcher in params:
+         params[magicVarForDispatcher]=dict([(k,v) for k,v in params[magicVarForDispatcher].iteritems() if k not in convBlackList])
       self.sendRequest('/queue', 'result', [p['uniqueId'], status, params, result])
       self._server.processingDispatcherCount-=1
 
    def childWait(self, dispatcher=None, sleepMethod=None, returnStatus=False):
       # parentServer.wait() is more complicated, becose it must check lock-status in parent, but suspend child
       sleepMethod=sleepMethod or self._server._sleep
-      while self.sendRequest('/parent', 'wait', [(dispatcher._id if dispatcher else None)]):
+      while self.sendRequest('/parent', 'wait', [(dispatcher._id if dispatcher else None), returnStatus]):
          if returnStatus: return True
          sleepMethod(self.settings.sleepTime_waitLock)
       if returnStatus: return False
@@ -373,16 +380,16 @@ class execBackend:
       self._lazyRequest[rId][0]['params'][0].append('%s_%s'%(self._id, name))
       self._lazyRequest[rId][0]['params'][1].append(val)
 
-   def childConnectionOverload(self, _connection):
-      # some overloads in _callDispatcher()._connection
-      _connection['parallelType']='parallelWithSocket'
-      _connection['parallelPoolSize']=self.settings.poolSize
-      _connection['parallelId']=self._id
-      # wrap methods for passing "_connection" object
-      _connection['call']['execute']=lambda code, scope=None, mergeGlobals=True, wait=True, cb=None: self.childEval(code, scope=scope, wait=wait, cb=cb, isExec=True, mergeGlobals=mergeGlobals, _connection=magicDict(_connection))
-      _connection['call']['eval']=lambda code, scope=None, wait=True, cb=None: self.childEval(code, scope=scope, wait=wait, cb=cb, isExec=False, mergeGlobals=False, _connection=magicDict(_connection))
-      _connection['call']['copyGlobal']=lambda name, actual=True, cb=None: self.childCopyGlobal(name, actual=actual, cb=cb, _connection=magicDict(_connection))
-      return _connection
+   def childMagicVarOverload(self, magicVarForDispatcher):
+      # some overloads in _callDispatcher().magicVarForDispatcher
+      magicVarForDispatcher['parallelType']='parallelWithSocket'
+      magicVarForDispatcher['parallelPoolSize']=self.settings.poolSize
+      magicVarForDispatcher['parallelId']=self._id
+      # wrap methods for passing "magicVarForDispatcher" object
+      magicVarForDispatcher['call']['execute']=lambda code, scope=None, mergeGlobals=True, wait=True, cb=None: self.childEval(code, scope=scope, wait=wait, cb=cb, isExec=True, mergeGlobals=mergeGlobals, magicVarForDispatcher=magicDict(magicVarForDispatcher))
+      magicVarForDispatcher['call']['eval']=lambda code, scope=None, wait=True, cb=None: self.childEval(code, scope=scope, wait=wait, cb=cb, isExec=False, mergeGlobals=False, magicVarForDispatcher=magicDict(magicVarForDispatcher))
+      magicVarForDispatcher['call']['copyGlobal']=lambda name, actual=True, cb=None: self.childCopyGlobal(name, actual=actual, cb=cb, magicVarForDispatcher=magicDict(magicVarForDispatcher))
+      return magicVarForDispatcher
 
    def childDisableNotImplemented(self):
       # disable none-implemented methods in parentServer for preventing call them from dispatcher
@@ -399,14 +406,14 @@ class execBackend:
       for name in whatList:
          setattr(self._parentServer, name, getattr(self._server, name))
 
-   def childEval(self, code, scope=None, wait=True, cb=None, isExec=False, mergeGlobals=False, _connection=None):
+   def childEval(self, code, scope=None, wait=True, cb=None, isExec=False, mergeGlobals=False, magicVarForDispatcher=None):
       #! сделать обработку ошибок и развернуть код для наглядности
       def tFunc(data, self):
-         data['cb'](data['result'], data['error'], _connection)
+         data['cb'](data['result'], data['error'], magicVarForDispatcher)
       data={'path':'/parent', 'method':'eval', 'params':[code, scope, isExec, mergeGlobals], 'cb':cb}
       return self.sendRequestEx(data, async=not(wait), cb=(tFunc if self._server._isFunction(cb) else None))
 
-   def childCopyGlobal(self, name, actual=True, cb=None, _connection=None):
+   def childCopyGlobal(self, name, actual=True, cb=None, magicVarForDispatcher=None):
       # if callback passed, method work in async mode
       nameArr=name if self._server._isArray(name) else [name]
       res={}
@@ -416,7 +423,7 @@ class execBackend:
             res[k]=self.parentGlobals.get(k, None)
             self._server._logger(4, 'CopyGlobal var "%s": without checking'%k)
          if self._server._isFunction(cb):
-            cb((res if self._server._isArray(name) else res.values()[0]), False, _connection)
+            cb((res if self._server._isArray(name) else res.values()[0]), False, magicVarForDispatcher)
       else:
          #! проверить разные варианты создания словаря по скорости
          nameHash=dict((k, self.parentGlobals_oldHash.get(k, None)) for k in nameArr)
@@ -424,7 +431,7 @@ class execBackend:
          def tFunc(data, self):
             if data['error']:
                if self._server._isFunction(data['cb']):
-                  return data['cb'](None, data['error'], _connection)
+                  return data['cb'](None, data['error'], magicVarForDispatcher)
                else: self._server._throw(data['error'])
             res={}
             for k, r in data['result'].iteritems():
@@ -446,7 +453,7 @@ class execBackend:
                   self.parentGlobals[k]=v
                   self._server._logger(4, 'CopyGlobal var "%s": changed'%k)
             if self._server._isFunction(data['cb']):
-               data['cb']((res if not data['onlyOne'] else res.values()[0]), False, _connection)
+               data['cb']((res if not data['onlyOne'] else res.values()[0]), False, magicVarForDispatcher)
             else: data['result']=res
          res=self.sendRequestEx(data, async=self._server._isFunction(cb), cb=tFunc)
          if self._server._isFunction(cb): return
@@ -596,7 +603,7 @@ class execBackend:
          dispatcher=self._parentServer.routes[dispatcherId['path']][dispatcherId['name']]['link']
       self._parentServer.lock(dispatcher=dispatcher)
 
-   def api_parentWait(self, dispatcherId=None, _connection=None):
+   def api_parentWait(self, dispatcherId=None, ignorePersistent=False, _connection=None):
       if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
          self._parentServer._throw('Access denied') # tokens not match
       if dispatcherId is None: dispatcher=None
@@ -604,8 +611,11 @@ class execBackend:
          self._server._throw('Wrong dispatcherId: %s'%dispatcherId)
       else:
          dispatcher=self._parentServer.routes[dispatcherId['path']][dispatcherId['name']]['link']
-      s=self._parentServer.wait(dispatcher=dispatcher, returnStatus=True)
-      return s
+      if self.settings.persistent_waitLock and not ignorePersistent:
+         self._parentServer.wait(dispatcher=dispatcher)
+         return False
+      else:
+         return self._parentServer.wait(dispatcher=dispatcher, returnStatus=True)
 
    def api_parentUnlock(self, dispatcherId=None, exclusive=False, _connection=None):
       if _connection.headers.get('Token', '__2')!=getattr(self, 'token', '__1'):
