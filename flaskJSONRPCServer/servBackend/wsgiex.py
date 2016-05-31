@@ -168,30 +168,49 @@ class StreamServerEx(SocketServer.TCPServer, object):
          except (OSError, self._selectClass.error) as e:
             if e.args[0]!=errno.EINTR: raise
 
+   # def serve_forever(self, poll_interval=0.5):
+   #    """Handle one request at a time until shutdown."""
+   #    self.__is_shut_down.clear()
+   #    try:
+   #       while not self.__shutdown_request:
+   #          #коммент из оригинального SocketServer.BaseServer
+   #          """
+   #          Consider using another file descriptor or connecting to the socket to wake this up instead of polling. Polling reduces our responsiveness to a shutdown request and wastes cpu at all other times.
+   #          """
+   #          r, _, _=self._wait_for_file_ready([self], [], [], poll_interval)
+   #          if self in r:
+   #             self._handle_request_noblock()
+   #    finally:
+   #       self.__shutdown_request=False
+   #       self.__is_shut_down.set()
+
    def serve_forever(self, poll_interval=0.5):
-      """Handle one request at a time until shutdown."""
+      """Continue call handle_request() until shutdown."""
       self.__is_shut_down.clear()
       try:
+         #коммент из оригинального SocketServer.BaseServer
+         """
+         Consider using another file descriptor or connecting to the socket to wake this up instead of polling. Polling reduces our responsiveness to a shutdown request and wastes cpu at all other times.
+         """
          while not self.__shutdown_request:
-            #коммент из оригинального SocketServer.BaseServer
-            """
-            Consider using another file descriptor or connecting to the socket to wake this up instead of polling. Polling reduces our responsiveness to a shutdown request and wastes cpu at all other times.
-            """
-            r, _, _=self._wait_for_file_ready([self], [], [], poll_interval)
-            if self in r:
-               self._handle_request_noblock()
+            self.handle_request(timeout=poll_interval, handle_timeout=False)
       finally:
          self.__shutdown_request=False
          self.__is_shut_down.set()
 
-   def handle_request(self):
+   def _calc_timeout(self, timeout):
+      if timeout is None:
+         if self.socket.gettimeout() is None:
+            timeout=self.timeout
+         else:
+            timeout=min(self.socket.gettimeout(), self.timeout)
+      return timeout
+
+   def handle_request(self, timeout=None, handle_timeout=True):
       """Handle one request, possibly blocking. Respects self.timeout."""
-      timeout=self.socket.gettimeout()
-      if timeout is None: timeout=self.timeout
-      elif self.timeout is not None:
-         timeout=min(timeout, self.timeout)
+      timeout=self._calc_timeout(timeout)
       r, _, _=self._wait_for_file_ready([self], [], [], timeout)
-      if not r:
+      if not r and handle_timeout:
          return self.handle_timeout()
       elif self in r:
          self._handle_request_noblock()
@@ -242,6 +261,26 @@ class StreamServerEx(SocketServer.TCPServer, object):
       t.daemon=daemon
       t.start()
       return t
+
+def serveMultipleServers(servers, poll_interval=0.5):
+   # reset event
+   for s in servers:
+      s._StreamServerEx__shutdown_request=False
+      s._StreamServerEx__is_shut_down.clear()
+   # run main cicle
+   while len(servers):
+      # try handle requsets
+      r, _, _=servers[0]._wait_for_file_ready(servers, [], [], poll_interval)
+      if r:
+         for s in r:
+            if s in servers:
+               s._handle_request_noblock()
+      # try handle stopping-signals
+      servers2=[]
+      for s in servers:
+         if s._StreamServerEx__shutdown_request: s._StreamServerEx__is_shut_down.set()
+         else: servers2.append(s)
+      servers=servers2
 
 class _SSLContext(object):
    """

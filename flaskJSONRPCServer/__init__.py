@@ -146,7 +146,7 @@ class flaskJSONRPCServer:
       self._findParentModule()
       self._werkzeugStopToken=''
       self._reloadBackup={}
-      self._gcStats=magicDict({'lastTime':0, 'processedRequestCount':0, 'processedDispatcherCount':0})
+      self._gcStats=magicDict({'lastTime':0, 'processedRequestCount':0, 'processedDispatcherCount':0, 'processing':False})
       self.deepLocked=False
       self.processingRequestCount=0
       self.processingDispatcherCount=0
@@ -157,8 +157,7 @@ class flaskJSONRPCServer:
       # prepare connPerMinute
       self.connPerMinute=magicDict({
          'nowMinute':0, 'count':0, 'oldCount':0, 'maxCount':0, 'minCount':0,
-         'history1':deque2([], 9999),
-         'history2':{'minute':deque2([], 9999), 'count':deque2([], 9999)}
+         'history':magicDict({'minute':deque2([], 9999), 'count':deque2([], 9999)})
       })
       # register URLs
       self._registerServerUrl(dict([[s, self._requestHandler] for s in self.pathsDef]))
@@ -421,11 +420,14 @@ class flaskJSONRPCServer:
          limit=resource.getrlimit(resource.RLIMIT_OFILE)[0] #for BSD
       except: pass
       if limit is None:
-         self._logger(2, "Can't get File Descriptor Limit")
+         self._logger(2, "WARNING: Can't get File Descriptor Limit")
          return None
       c=self._countFileDescriptor()
       if c is None: return None
-      return (c*multiply>=limit)
+      res=c*multiply>=limit
+      if res:
+         self._logger(2, 'WARNING: reached file descriptors limit %s(%s)/%s'%(c, c*multiply, limit))
+      return res
 
    def _inChild(self):
       """
@@ -459,7 +461,8 @@ class flaskJSONRPCServer:
 
    def _isString(self, o): return isinstance(o, (str, unicode))
 
-   def _isNum(self, var): return isinstance(var, (int, float, long, complex, decimal.Decimal))
+   def _isNum(self, var):
+      return (var is not True) and (var is not False) and isinstance(var, (int, float, long, complex, decimal.Decimal))
 
    def _fileGet(self, fName, mode='r'):
       """
@@ -660,13 +663,13 @@ class flaskJSONRPCServer:
             t=gevent.spawn(target, *args, **kwargs)
       return t
 
-   def callAsync(self, target, args=None, kwargs=None, sleepTime=0.45, sleepMethod=None, returnChecker=False):
+   def callAsync(self, target, args=None, kwargs=None, sleepTime=0.45, sleepMethod=None, returnChecker=False, wait=True):
       """
-      This method allow to run heavy task asynchronously (without blocking server) when used with gevent, or simply in threaded-mode without gevent. It can return result of executed function, or function 'checker', that must be called for getting result (or happened errors).
+      This method allow to run <target> asynchronously (without blocking server) when used with gevent, or simply in threaded-mode without gevent. It can return result of executed function <target>, or function 'checker', that must be called for getting result (or happened errors). If <wait> and <returnChecker> both passed to False, <target> will be executed in background (without blocking current thread or greenlet) and return nothing.
 
       :Attention:
 
-      It's not a silver bullet! This method incress perfomance only for limited cases, like executing C-code or perfoming IO-ops, not frendly for gevent. It really help with <pymysql> on large responses. In all other cases it not incress perfomance, but incress responsiveness of server. This mean, while some function executed in this way, server still availible and can process other requests.
+      It's not a silver bullet! This method incress perfomance only for limited cases, like executing C-code or perfoming IO-ops, that not frendly for gevent. It really help with <pymysql> on large responses. In all other cases it not incress perfomance, but incress responsiveness of server. This mean, while some function executed in this way, server still availible and can process other requests.
 
       :Attention:
 
@@ -678,27 +681,34 @@ class flaskJSONRPCServer:
       :param float sleepTime:
       :param func|None sleepMethod: If None, default will be used.
       :param bool returnChecker: If True, return function, that must be called for get result.
+      :param bool wait: If True, current thread or greenlet will be blocked until results.
       :return any|func: Returns result of executed function or checker.
       """
       sleepMethod=sleepMethod or self._sleep
       args=args or []
       kwargs=kwargs or {}
       mytime=self._getms()
+      save=wait or returnChecker
       # prepare queue
       if not hasattr(self, '_callAsync_queue'): self._callAsync_queue={}
       # generate unique id and workspace
       cId=self._randomEx(vals=self._callAsync_queue)
-      self._callAsync_queue[cId]={'result':None, 'inProgress':True, 'error':None}
+      self._callAsync_queue[cId]={'result':None, 'inProgress':True, 'error':None, '_thread':None}
       # init wrapper
-      def tFunc_wrapper(self, cId, target, args, kwargs):
+      def tFunc_wrapper(self, cId, target, args, kwargs, save):
          try:
             self._callAsync_queue[cId]['result']=target(*args, **kwargs)
          except Exception, e:
             self._callAsync_queue[cId]['error']=e
          self._callAsync_queue[cId]['inProgress']=False
+         if not save:
+            e=self._callAsync_queue[cId]['error']
+            del self._callAsync_queue[cId]
+            if e: raise e
       # call in native thread
-      self._thread(tFunc_wrapper, args=[self, cId, target, args, kwargs], forceNative=True)
+      self._callAsync_queue[cId]['_thread']=self._thread(tFunc_wrapper, args=[self, cId, target, args, kwargs, save], forceNative=True)
       # init checker
+      if not save: return
       def tFunc_checker(mytime=None, __cId=cId):
          if self._callAsync_queue[cId]['inProgress']: return False, None, None
          else:
@@ -1070,7 +1080,7 @@ class flaskJSONRPCServer:
       sys.exc_clear()
       return s
 
-   def stats(self, inMS=False):
+   def stats(self, inMS=False, history=False):
       """
       This method return statistics of server.
 
@@ -1078,6 +1088,17 @@ class flaskJSONRPCServer:
       :return dict: Collected perfomance stats
       """
       res={'connPerSec_now':round(self.connPerMinute.count/60.0, 2), 'connPerSec_old':round(self.connPerMinute.oldCount/60.0, 2), 'connPerSec_max':round(self.connPerMinute.maxCount/60.0, 2), 'speedStats':{}, 'processingRequestCount':self.processingRequestCount, 'processingDispatcherCount':self.processingDispatcherCount}
+      if history and self._isNum(history):
+         history*=-1
+         res['connPerSec_history']={
+            'minute':list(self.connPerMinute.history.minute)[history:],
+            'count':list(self.connPerMinute.history.count)[history:]
+         }
+      elif history:
+         res['connPerSec_history']={
+            'minute':list(self.connPerMinute.history.minute),
+            'count':list(self.connPerMinute.history.count)
+         }
       #calculate speed stats
       for k, v in self.speedStats.iteritems():
          v1=max(v)
@@ -1499,6 +1520,7 @@ class flaskJSONRPCServer:
          self._gcStats.processedDispatcherCount=0
          if not force: return
       # check
+      if self._gcStats.processing: return
       mytime=self._getms(False)
       if not force:
          if not self._gcStats.lastTime: return
@@ -1506,17 +1528,18 @@ class flaskJSONRPCServer:
             self._gcStats.processedRequestCount<self.settings.controlGC_everyRequestCount and \
             self._gcStats.processedDispatcherCount<self.settings.controlGC_everyDispatcherCount: return
       # collect garbage and reset stats
+      self._gcStats.processing=True
       mytime=self._getms()
       m1=self._countMemory()
       s=gc.collect()
       m2=self._countMemory()
-      if s:
+      if s and m1 and m2:
          self._logger(3, 'GC executed manually: collected %s objects, memore freed %smb, used %smb, peak %smb'%(s, round((m1.now-m2.now)/1024.0, 1), round(m2.now/1024.0, 1), round(m2.peak/1024.0, 1)))
-      self._logger(4, 'GC executed manually: collected %s objects, memore freed %smb, used %smb, peak %smb'%(s, round((m1.now-m2.now)/1024.0, 1), round(m2.now/1024.0, 1), round(m2.peak/1024.0, 1)))
       self._speedStatsAdd('controlGC', self._getms()-mytime)
       self._gcStats.lastTime=self._getms(False)
       self._gcStats.processedRequestCount=0
       self._gcStats.processedDispatcherCount=0
+      self._gcStats.processing=False
 
    def _compressResponse(self, resp):
       """
@@ -1613,8 +1636,11 @@ class flaskJSONRPCServer:
       self._gcStats.processedRequestCount+=1
       # calculate connections per second
       nowMinute=int(time.time())/60
-      #! добавить ведение истории в двух вариантах (self.connPerMinute.history1 и self.connPerMinute.history2) и сравнить их производительность
       if nowMinute!=self.connPerMinute.nowMinute:
+         # add to history
+         self.connPerMinute.history.minute.append(self.connPerMinute.nowMinute)
+         self.connPerMinute.history.count.append(round(self.connPerMinute.count/60.0, 2))
+         # replace old values
          self.connPerMinute.nowMinute=nowMinute
          if self.connPerMinute.count:
             self.connPerMinute.oldCount=self.connPerMinute.count
@@ -1865,6 +1891,7 @@ class flaskJSONRPCServer:
                   if not cb: continue
                   elif self._isFunction(cb) and cb(self) is not True: continue
                   elif cb=='checkFileDescriptor' and not self._checkFileDescriptor(multiply=1.25): continue
+                  self._logger(3, 'Restarting server..')
                   self.restart(joinLoop=False)
                   break
          except KeyboardInterrupt: pass
@@ -1950,7 +1977,7 @@ class flaskJSONRPCServer:
       self._registerServerUrl(dict([[s, self._requestHandler] for s in self.pathsDef]))
       # start execBackends
       self._startExecBackends()
-      if self.settings.allowCompress:
+      if self.settings.allowCompress and not(self.settings.experimental and experimentalPack.use_moreAsync and '_compressGZIP' in experimentalPack.moreAsync_methods):
          self._logger(2, 'WARNING: included compression is slow')
       if self.setts.blocking:
          self._logger(2, 'WARNING: server work in blocking mode')
@@ -1985,7 +2012,10 @@ class flaskJSONRPCServer:
             environ['__flaskJSONRPCServer_binded']=__flaskJSONRPCServer_binded
             return __wsgi(environ, start_response)
          # start
-         self.servBackend.start(bindAdress, wsgiWrapped, self, joinLoop=(joinLoop and i+1==len(self.setts.ip)))
+         if getattr(self.servBackend, '_supportMultiple', False) and len(self.setts.ip)>1:
+            self.servBackend.startMultiple(bindAdress, wsgiWrapped, self, joinLoop=joinLoop, isLast=(i+1==len(self.setts.ip)))
+         else:
+            self.servBackend.start(bindAdress, wsgiWrapped, self, joinLoop=(joinLoop and i+1==len(self.setts.ip)))
 
    def _stopExecBackends(self, timeout=20, processingDispatcherCountMax=0):
       """

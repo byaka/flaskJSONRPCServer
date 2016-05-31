@@ -16,13 +16,12 @@ uJSON
 if __name__=='__main__':
    import sys, os
    sys.path.append(os.path.dirname(os.path.realpath(sys.argv[0]))+'/..')
-   from utils import magicDict
+   from utils import magicDict, deque2
 else:
    # from flaskJSONRPCServer.utils import magicDict
-   from ..utils import magicDict
+   from ..utils import magicDict, deque2
 
 import sys, string, time, re, codecs
-from collections import deque
 from decimal import Decimal
 
 use_moreAsync=True
@@ -108,7 +107,7 @@ def asyncJSON_dumps(data, cb=None, maxProcessTime=0.3):
    _timetime=time.time
    #create vars
    out=[]
-   stack=deque()
+   stack=deque2()
    mytime=_timetime()
    maxProcessTime=maxProcessTime
    #link to var's methods
@@ -257,7 +256,7 @@ def asyncJSON_loads(data, cb=None, maxProcessTime=0.3):
    out=None
    curLevelType=None
    curLevelLink=None
-   prevLevel=deque()
+   prevLevel=deque2()
    prevLevelAppend=prevLevel.appendleft
    prevLevelPop=prevLevel.popleft
    prevKey=None

@@ -12,10 +12,11 @@ class servBackend:
    _supportRawSocket=True
    _supportGevent=True
    _supportNative=True
+   _supportMultiple=True
 
    def __init__(self, spawnThreadFunc=None, killThreadFunc=None, sleepFunc=None, id=None):
       #check importing
-      from wsgiex import ThreadedStreamServerEx, WSGIRequestHandlerEx, StreamServerEx, terminate_thread
+      from wsgiex import ThreadedStreamServerEx, WSGIRequestHandlerEx, StreamServerEx, terminate_thread, serveMultipleServers
       #init settings and _id
       self.settings=magicDict({
          'spawnThreadFunc':spawnThreadFunc,
@@ -23,6 +24,7 @@ class servBackend:
          'sleepFunc':sleepFunc
       })
       self._id=id or self._id
+      self._multipleQueue=[]
 
    def create(self, bind_addr, wsgiApp, log=True, sslArgs=None, threaded=True, useGevent=False, backlog=1000):
       from wsgiex import ThreadedStreamServerEx, WSGIRequestHandlerEx, StreamServerEx, terminate_thread
@@ -58,19 +60,36 @@ class servBackend:
       server=servClass(bind_addr, **kwargs)
       return server
 
-   def start(self, bindAdress, wsgiApp, server, joinLoop):
+   def start(self, bindAdress, wsgiApp, server, joinLoop, andRun=True):
       if not hasattr(server, '_server'): server._server=[]
       if not hasattr(server, '_serverThread'): server._serverThread=[]
       if not server._isTuple(bindAdress) and not server._isArray(bindAdress): backlog=None
       else: backlog=server.setts.backlog
       s=self.create(bindAdress, wsgiApp, log=server.setts.debug, threaded=True, useGevent=server.setts.gevent, sslArgs=server.setts.ssl, backlog=backlog)
-      sThread=server._thread(s.serve_forever)
       server._server.append(s)
-      server._serverThread.append(sThread)
-      if joinLoop:
-         try:
-            while True: server._sleep(1000)
-         except KeyboardInterrupt: pass
+      if andRun:
+         sThread=server._thread(s.serve_forever)
+         server._serverThread.append(sThread)
+         if joinLoop:
+            try:
+               while True: server._sleep(1000)
+            except KeyboardInterrupt: pass
+      else:
+         return s
+
+   def startMultiple(self, bindAdress, wsgiApp, server, joinLoop, isLast):
+      self._multipleQueue.append(self.start(bindAdress, wsgiApp, server, False, andRun=False))
+      if isLast:
+         from wsgiex import serveMultipleServers
+         s=self._multipleQueue
+         self._multipleQueue=[]
+         if joinLoop:
+            try:
+               serveMultipleServers(s)
+            except KeyboardInterrupt: pass
+         else:
+            sThread=server._thread(serveMultipleServers, args=[s])
+            server._serverThread.append(sThread)
 
    def stop(self, serverInstance, serverIndex, server, timeout=5):
       serverInstance.stop(timeout=timeout)

@@ -12,6 +12,7 @@ class servBackend:
    _supportRawSocket=True
    _supportGevent=True
    _supportNative=False
+   _supportMultiple=False
 
    def __init__(self, id=None):
       #check importing
