@@ -408,15 +408,16 @@ class virtVar(object):
    #    return self._val.__()
 
 #патчинг встроенного метода id
-import __builtin__
-virtVar.__originalMethod_id=__builtin__.id
-def _id(s):
-   # print '>>>>>>>>>>>>>>> id'
-   if isinstance(s, (virtVar)):
-      return virtVar.__originalMethod_id(s._virtVar__getValue())
-   else:
-      return virtVar.__originalMethod_id(s)
-__builtin__.id=_id
+# import __builtin__
+# virtVar.__originalMethod_id=__builtin__.id
+# def _id(s):
+#    # print '>>>>>>>>>>>>>>> id'
+#    if isinstance(s, (virtVar)):
+#       return virtVar.__originalMethod_id(s._virtVar__getValue())
+#    else:
+#       return virtVar.__originalMethod_id(s)
+# __builtin__.id=_id
+#! похоже этот патчинг ломает поведение id() при многократном импорте
 
 """
    не удается изменить поведение оператора 'is' чтобы корректно обработать ситуацию '100 is virtVar(100)'

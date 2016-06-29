@@ -2,7 +2,7 @@
 This module provide Serving backend, that use <wsgiex>.
 """
 
-from ..utils import magicDict
+from ..utils import *
 
 class servBackend:
    """
@@ -63,7 +63,7 @@ class servBackend:
    def start(self, bindAdress, wsgiApp, server, joinLoop, andRun=True):
       if not hasattr(server, '_server'): server._server=[]
       if not hasattr(server, '_serverThread'): server._serverThread=[]
-      if not server._isTuple(bindAdress) and not server._isArray(bindAdress): backlog=None
+      if not isTuple(bindAdress) and not isArray(bindAdress): backlog=None
       else: backlog=server.setts.backlog
       s=self.create(bindAdress, wsgiApp, log=server.setts.debug, threaded=True, useGevent=server.setts.gevent, sslArgs=server.setts.ssl, backlog=backlog)
       server._server.append(s)

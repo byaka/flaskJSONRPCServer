@@ -3,7 +3,7 @@
 
 __ver_major__ = 0
 __ver_minor__ = 2
-__ver_patch__ = 1
+__ver_patch__ = 2
 __ver_sub__ = ""
 __version__ = "%d.%d.%d" % (__ver_major__, __ver_minor__, __ver_patch__)
 """
@@ -158,8 +158,7 @@ class StreamServerEx(SocketServer.TCPServer, object):
       self.setup_environ()
 
    def start(self):
-      self.serve_forever(self, poll_interval=0.5)
-      # while not self.__shutdown_request: self.handle_request()
+      self.serve_forever(poll_interval=0.5)
 
    def _wait_for_file_ready(self, *args):
       while True:
@@ -168,27 +167,11 @@ class StreamServerEx(SocketServer.TCPServer, object):
          except (OSError, self._selectClass.error) as e:
             if e.args[0]!=errno.EINTR: raise
 
-   # def serve_forever(self, poll_interval=0.5):
-   #    """Handle one request at a time until shutdown."""
-   #    self.__is_shut_down.clear()
-   #    try:
-   #       while not self.__shutdown_request:
-   #          #коммент из оригинального SocketServer.BaseServer
-   #          """
-   #          Consider using another file descriptor or connecting to the socket to wake this up instead of polling. Polling reduces our responsiveness to a shutdown request and wastes cpu at all other times.
-   #          """
-   #          r, _, _=self._wait_for_file_ready([self], [], [], poll_interval)
-   #          if self in r:
-   #             self._handle_request_noblock()
-   #    finally:
-   #       self.__shutdown_request=False
-   #       self.__is_shut_down.set()
-
    def serve_forever(self, poll_interval=0.5):
       """Continue call handle_request() until shutdown."""
       self.__is_shut_down.clear()
       try:
-         #коммент из оригинального SocketServer.BaseServer
+         # comment from original SocketServer.BaseServer
          """
          Consider using another file descriptor or connecting to the socket to wake this up instead of polling. Polling reduces our responsiveness to a shutdown request and wastes cpu at all other times.
          """
@@ -198,17 +181,17 @@ class StreamServerEx(SocketServer.TCPServer, object):
          self.__shutdown_request=False
          self.__is_shut_down.set()
 
-   def _calc_timeout(self, timeout):
-      if timeout is None:
-         if self.socket.gettimeout() is None:
-            timeout=self.timeout
-         else:
-            timeout=min(self.socket.gettimeout(), self.timeout)
+   def _calc_timeout(self):
+      if self.socket.gettimeout() is None:
+         timeout=self.timeout
+      else:
+         timeout=min(self.socket.gettimeout(), self.timeout)
       return timeout
 
    def handle_request(self, timeout=None, handle_timeout=True):
       """Handle one request, possibly blocking. Respects self.timeout."""
-      timeout=self._calc_timeout(timeout)
+      if timeout is None:
+         timeout=self._calc_timeout()
       r, _, _=self._wait_for_file_ready([self], [], [], timeout)
       if not r and handle_timeout:
          return self.handle_timeout()
@@ -263,6 +246,9 @@ class StreamServerEx(SocketServer.TCPServer, object):
       return t
 
 def serveMultipleServers(servers, poll_interval=0.5):
+   """
+   Start multiple servers with one eventLoop.
+   """
    # reset event
    for s in servers:
       s._StreamServerEx__shutdown_request=False
@@ -513,7 +499,7 @@ class WSGIRequestHandlerEx(wsgiref.simple_server.WSGIRequestHandler, object):
       env['wsgi.url_scheme']='http' if self.server._ssl_context is None else 'https'
       #solve some encoding's problems
       env['PATH_INFO']=self.encoding_dance(env['PATH_INFO'])
-      env['QUERY_STRING']=self.encoding_dance(env['PATH_INFO'])
+      env['QUERY_STRING']=self.encoding_dance(env['QUERY_STRING'])
       #server-specific
       env['wsgiex.server_instance']=self.server
       env['wsgiex.handler_instance']=self
