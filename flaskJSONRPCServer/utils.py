@@ -82,7 +82,7 @@ class magicDict(dict):
    Get and set values like in Javascript (dict.<key>).
    """
    def __getattr__(self, k):
-      if k[:2]=='__': raise AttributeError(k) #for support PICKLE protocol and correct isFunction() check
+      if k[:2]=='__': raise AttributeError(k)  #for support PICKLE protocol and correct isFunction() check
       return self.__getitem__(k)
 
    # __getattr__=dict.__getitem__
@@ -98,9 +98,11 @@ class magicDictCold(magicDict):
       if k=='__frozen': return object.__getattribute__(self, '__frozen')
       return magicDict.__getattr__(self, k)
 
-   def __freeze(self): object.__setattr__(self, '__frozen', True)
+   def __freeze(self):
+      object.__setattr__(self, '__frozen', True)
 
-   def __unfreeze(self): object.__setattr__(self, '__frozen', False)
+   def __unfreeze(self):
+      object.__setattr__(self, '__frozen', False)
 
    def __setattr__(self, k, v):
       if getattr(self, '__frozen', None): raise RuntimeError('Frozen')

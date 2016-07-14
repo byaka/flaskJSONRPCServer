@@ -1103,24 +1103,26 @@ class flaskJSONRPCServer:
          elif loglevel is True: pass
          elif level>loglevel: return
       levelPrefix=['', 'ERROR:', 'WARNING:', 'INFO:', 'DEBUG:']
+      _write=sys.stdout.write
+      _repr=self._serializeJSON
       for i, s in enumerate(args):
          # auto-prefix
          if not i and level and level<len(levelPrefix):
             s2=levelPrefix[level]
-            if not isString(s) or not s.startswith(s2): sys.stdout.write(s2+' ')
+            if not isString(s) or not s.startswith(s2): _write(s2+' ')
          # try to printing
-         try: sys.stdout.write(s)
+         try: _write(s)
          except:
             try:
-               s=self._serializeJSON(s)
+               s=_repr(s)
                try:
-                  sys.stdout.write(s if s else '')
+                  if s: _write(s)
                except UnicodeEncodeError:
-                  sys.stdout.write(s.encode('utf8') if s else '')
+                  _write(s.encode('utf8'))
             except Exception, e:
-               sys.stdout.write('<UNPRINTABLE DATA> %s'%e)
-         if i<len(args)-1: sys.stdout.write(' ')
-      sys.stdout.write('\n')
+               _write('<UNPRINTABLE_DATA> %s'%e)
+         if i<len(args)-1: _write(' ')
+      _write('\n')
 
    def lock(self, dispatcher=None):
       """

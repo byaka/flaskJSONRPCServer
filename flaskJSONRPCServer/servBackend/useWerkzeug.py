@@ -44,7 +44,7 @@ class servBackend:
       server._serverThread.append(sThread)
       if joinLoop:
          try:
-            while True: server._sleep(1000)
+            while server.started: server._sleep(1000)
          except KeyboardInterrupt: pass
 
    def stop(self, serverInstance, serverIndex, server, timeout=5):
