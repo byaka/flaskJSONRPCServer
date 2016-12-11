@@ -4,7 +4,7 @@
 __ver_major__ = 0
 __ver_minor__ = 9
 __ver_patch__ = 2
-__ver_sub__ = ""
+__ver_sub__ = "dev"
 __version__ = "%d.%d.%d" % (__ver_major__, __ver_minor__, __ver_patch__)
 """
 This library is an extended implementation of server for JSON-RPC protocol. It supports only json-rpc 2.0 specification for now, which includes batch submission, keyword arguments, notifications, etc.
@@ -28,7 +28,7 @@ This library is an extended implementation of server for JSON-RPC protocol. It s
    limitations under the License.
 """
 
-import sys, inspect, random, decimal, json, datetime, time, os, zipfile, imp, hashlib, threading, gc, socket, Cookie, httplib, wsgiref.util
+import sys, inspect, random, decimal, json, datetime, time, os, imp, hashlib, threading, gc, socket, Cookie, httplib, wsgiref.util
 from types import InstanceType, IntType, FloatType, LongType, ComplexType, NoneType, UnicodeType, StringType, BooleanType, LambdaType, DictType, ListType, TupleType, ModuleType, FunctionType
 from cStringIO import StringIO
 from gzip import GzipFile
@@ -49,7 +49,7 @@ try:
 except ImportError, e:
    print 'EXPERIMENTAL package not loaded:', e
 
-class errorMain(Exception):
+class MainError(Exception):
    """ Main error class for flaskJSONRPCServer. """
    pass
 
@@ -119,9 +119,9 @@ class flaskJSONRPCServer:
          'auth':auth,
          'experimental':experimental,
          'controlGC':controlGC,
-         'controlGC_everySeconds':30*60, # every 30 minutes
-         'controlGC_everyRequestCount':150*1000, # every 150k requests
-         'controlGC_everyDispatcherCount':50*1000, # every 50k dispatcher's calls
+         'controlGC_everySeconds':3*60,  # every 30 minutes
+         'controlGC_everyRequestCount':150*1000,  # every 150k requests
+         'controlGC_everyDispatcherCount':150*1000,  # every 150k dispatcher's calls
          'backlog':10*1000,
          'magicVarForDispatcher':magicVarForDispatcher
       })
@@ -138,17 +138,25 @@ class flaskJSONRPCServer:
          self.settings['multipleAdress']=multipleAdress
          bindAdress=bindAdress if multipleAdress else [bindAdress]
          for bind in bindAdress:
-            if len(bind)!=2: self._throw('Wrong "bindAdress" parametr: %s'%bind)
-            isSocket=str(type(bind[1])) in ["<class 'socket._socketobject'>", "<class 'gevent.socket.socket'>", "<class 'gevent._socket2.socket'>"]
-            tArr={
-               'ip':bind[0] if not isSocket else None,
-               'port':bind[1] if not isSocket else None,
-               'socketPath':bind[0] if isSocket else None,
-               'socket':bind[1] if isSocket else None
-            }
+            tArr={'ip':None, 'port':None, 'socketPath':None, 'socket':None}
+            if isString(bind):
+               if not checkPath(bind):
+                  self._throw('Wrong path for UDS socket: %s'%bind)
+               tArr['socketPath']=bind
+            else:
+               if len(bind)!=2:
+                  self._throw('Wrong "bindAdress" parametr: %s'%bind)
+               isSocket=str(type(bind[1])) in ["<class 'socket._socketobject'>", "<class 'gevent.socket.socket'>", "<class 'gevent._socket2.socket'>"]
+               if isSocket:
+                  tArr['socketPath']=bind[0]
+                  tArr['socket']=bind[1]
+               else:
+                  tArr['ip']=bind[0]
+                  tArr['port']=bind[1]
             for k, v in tArr.iteritems():
                self.settings[k].append(v)
       # other
+      self._magicVarForDispatcherOverload=[]
       self.servBackend=None
       self.locked=False
       self._parentModule=None
@@ -191,6 +199,17 @@ class flaskJSONRPCServer:
       # enable GC manual control
       if self.settings.controlGC: self._controlGC()
 
+   def _initListenerUDS(self, path, sockClass=None, backlog=None):
+      """ Create listeners for UDS socket. """
+      sockClass=sockClass or self._socketClass()
+      backlog=backlog or self.__settings['backlog']
+      if os.path.exists(path):  #remove if exist
+         os.remove(path)
+      l=sockClass.socket(sockClass.AF_UNIX, sockClass.SOCK_STREAM)
+      l.bind(path)
+      l.listen(backlog)
+      return l
+
    def _registerExecBackend(self, execBackend, notif):
       """
       This merhod register new execute backend in server, backend will be start when <server>.start() called.
@@ -205,15 +224,13 @@ class flaskJSONRPCServer:
       if execBackend in self.execBackend: return execBackend
       # get _id of backend and prepare
       _id=None
-      if execBackend!='simple' and isString(execBackend): #registered serv-backend
+      if execBackend!='simple' and isString(execBackend):  #registered exec-backend
          if execBackend not in execBackendCollection.execBackendMap:
             self._throw('Unknown Exec-backend "%s"'%execBackend)
-      # if execBackend in execBackendCollection.execBackendMap: #registered exec-backend
          execBackend=execBackendCollection.execBackendMap[execBackend](notif)
          _id=getattr(execBackend, '_id', None)
-      elif execBackend=='simple': #without exec-backend
-         _id='simple'
-         execBackend=None
+      elif execBackend=='simple':  #without exec-backend
+         return 'simple'
       elif isDict(execBackend):
          _id=execBackend.get('_id', None)
          execBackend=magicDict(execBackend)
@@ -224,7 +241,9 @@ class flaskJSONRPCServer:
       # try to add execBackend
       if not _id:
          self._throw('No "_id" in Exec-backend "%s"'%execBackend)
-      if execBackend and _id not in self.execBackend: # add execBackend to map if not exist
+      if not hasattr(execBackend, 'add'):
+         self._throw('No "add()" in Exec-backend "%s"'%execBackend)
+      if _id not in self.execBackend:  # add execBackend to map if not exist
          self.execBackend[_id]=execBackend
       return _id
 
@@ -244,14 +263,16 @@ class flaskJSONRPCServer:
       if type not in postprocess._typeSupported:
          self._throw("Unsupported postprocess-type, now suppoerted only %s"%list(postprocess._typeSupported))
       if status is not None:
-         # use by this status
-         if not isInt(status):
-            raise TypeError('<status> must be number')
-         if status not in self.settings.postprocess['byStatus']:
-            self.settings.postprocess['byStatus'][status]=[]
-         self.settings.postprocess['byStatus'][status].append((type, mode, cb))
+         status=status if isArray(status) else [status]
+         for s in status:
+            # use by this status
+            if not isInt(s):
+               raise TypeError('<status> must be number or list of numbers')
+            if s not in self.settings.postprocess['byStatus']:
+               self.settings.postprocess['byStatus'][s]=[]
+            self.settings.postprocess['byStatus'][s].append((type, mode, cb))
       else:
-         #! use always
+         #! need to test "use always" type
          self._throw("Postprocessers without conditions currently not supported")
 
    def postprocessAdd_wsgi(self, wsgi, mode=None, status=None):
@@ -283,11 +304,12 @@ class flaskJSONRPCServer:
          from gevent import socket as geventSocket
          from gevent.fileobject import FileObjectThread as geventFileObjectThread
          return True
-      except ImportError, e: self._throw('gevent not found: %s'%e)
+      except ImportError, e:
+         self._throw('gevent not found: %s'%e)
 
    def _import(self, modules, scope=None, forceDelete=True):
       """
-      This methodReplace existed imported module and monke_putch if needed.
+      This method replace existed (imported) modules and monke_patch if needed.
       """
       #! Add checking with "monkey.is_module_patched()"
       # delete existed
@@ -336,7 +358,7 @@ class flaskJSONRPCServer:
 
    def _importSocket(self, scope=None, forceDelete=True):
       """
-      This method import (or patch) module <socket> to scope.
+      This method import (or patch) module <socket> (and some others) to scope.
 
       :param dict scope:
       :param bool forceDelete: if True really delete existed modul before importing.
@@ -370,11 +392,11 @@ class flaskJSONRPCServer:
          self._logger(2, 'WARNING: tweaking file descriptors limit not supported on your platform')
          return None
       if descriptors:
-         try: #for Linux
+         try:  #for Linux
             if resource.getrlimit(resource.RLIMIT_NOFILE)!=descriptors:
                resource.setrlimit(resource.RLIMIT_NOFILE, descriptors)
          except: pass
-         try: #for BSD
+         try:  #for BSD
             if resource.getrlimit(resource.RLIMIT_OFILE)!=descriptors:
                resource.setrlimit(resource.RLIMIT_OFILE, descriptors)
          except: pass
@@ -389,9 +411,9 @@ class flaskJSONRPCServer:
       mytime=getms()
       pid=os.getpid() if pid is None else pid
       try:
-         c=0
-         for s in os.listdir('/proc/%s/fd'%pid): c+=1
-         # c=len([s for s in os.listdir('/proc/%s/fd'%pid)])
+         # c=0
+         # for s in os.listdir('/proc/%s/fd'%pid): c+=1
+         c=len(os.listdir('/proc/%s/fd'%pid))
          self._speedStatsAdd('countFileDescriptor', getms()-mytime)
          return c
       except Exception, e:
@@ -440,12 +462,12 @@ class flaskJSONRPCServer:
          self._logger(1, 'ERROR: checking file descriptors limit not supported on your platform')
          return None
       limit=None
-      try:
-         limit=resource.getrlimit(resource.RLIMIT_NOFILE)[0] #for Linux
-      except: pass
-      try:
-         limit=resource.getrlimit(resource.RLIMIT_OFILE)[0] #for BSD
-      except: pass
+      try:  #for Linux
+         limit=resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+      except:
+         try:  #for BSD
+            limit=resource.getrlimit(resource.RLIMIT_OFILE)[0]
+         except: pass
       if limit is None:
          self._logger(2, "WARNING: Can't get File Descriptor Limit")
          return None
@@ -468,31 +490,25 @@ class flaskJSONRPCServer:
       """
       This method open file and read content in mode <mode>, if file is archive then open it and find file with name <mode>.
 
+      :Attention:
+      Auto-unpacking of zip-files temporally disabled.
+
       :param str fName: Path to file.
       :param str mode: Read-mode or file name.
       :return str:
       """
       fName=fName.encode('cp1251')
       if not os.path.isfile(fName): return None
-      if zipfile.is_zipfile(fName):
-         c=zipfile.ZipFile(fName, mode)
-         try: s=c.read(mode)
-         except Exception, e:
-            self._logger(1, 'Error fileGet.zipfile', fName, ',', mode, e)
-            s=None
-         try: c.close()
-         except: pass
-      else:
-         f=None
-         try:
-            f=open(fName, mode)
-            if self.__settings['gevent']:
-               self._tryGevent()
-               f=geventFileObjectThread(f)
-            s=f.read()
-         except Exception, e:
-            self._logger(1, 'Error fileGet', fName, ',', mode, e)
-            s=None
+      f=None
+      try:
+         f=open(fName, mode)
+         if self.__settings['gevent']:
+            self._tryGevent()
+            f=geventFileObjectThread(f)
+         s=f.read()
+      except Exception, e:
+         self._logger(1, 'Error fileGet', fName, ',', mode, e)
+         s=None
       if f is not None: f.close()
       return s
 
@@ -589,11 +605,11 @@ class flaskJSONRPCServer:
 
    def _throw(self, data):
       """
-      This method throw exception of class <errorMain:data>.
+      This method throw exception of class <MainError:data>.
 
       :param str data: Info about error.
       """
-      raise errorMain(data)
+      raise MainError(data)
 
    def _thread(self, target, args=None, kwargs=None, forceNative=False):
       """
@@ -626,9 +642,10 @@ class flaskJSONRPCServer:
             t=gevent.spawn(target, *args, **kwargs)
       return t
 
-   def callAsync(self, target, args=None, kwargs=None, sleepTime=0.45, sleepMethod=None, returnChecker=False, wait=True):
+   def callAsync(self, target, args=None, kwargs=None, sleepTime=0.3, sleepMethod=None, returnChecker=False, wait=True, forceNative=True, cb=None, cbData=None):
       """
       This method allow to run <target> asynchronously (without blocking server) when used with gevent, or simply in threaded-mode without gevent. It can return result of executed function <target>, or function 'checker', that must be called for getting result (or happened errors). If <wait> and <returnChecker> both passed to False, <target> will be executed in background (without blocking current thread or greenlet) and return nothing.
+      You also can pass optional callback, that will be called after <target> completed and before results returned to main thread. So, if you only want to use callback and nothing more, set <wait> to False also.
 
       :Attention:
 
@@ -642,9 +659,12 @@ class flaskJSONRPCServer:
       :param list args:
       :param dict kwargs:
       :param float sleepTime:
-      :param func|None sleepMethod: If None, default will be used.
+      :param func(<sleepTime>) sleepMethod: This method will be called, while <target> not complete and <wait> is True. If None, default will be used.
       :param bool returnChecker: If True, return function, that must be called for get result.
       :param bool wait: If True, current thread or greenlet will be blocked until results.
+      :param bool forceNative: If this False, method will use greenlets instead of native threads (ofcourse if gevent allowed). This cancels all benefits of this method, but can be useful, if you simply want to run code in greenlet and wait for result.
+      :param func(result, error, <cbData>) cb: If passed, this function will be called after <target> completed and before results returned to main thread.
+      :param any cbData:
       :return any|func: Returns result of executed function or checker.
       """
       sleepMethod=sleepMethod or self._sleep
@@ -658,35 +678,43 @@ class flaskJSONRPCServer:
       cId=randomEx(vals=self._callAsync_queue)
       self._callAsync_queue[cId]={'result':None, 'inProgress':True, 'error':None, '_thread':None}
       # init wrapper
-      def tFunc_wrapper(self, cId, target, args, kwargs, save):
+      def tFunc_wrapper(self, cId, target, args, kwargs, save, cb, cbData):
+         link=self._callAsync_queue[cId]
          try:
-            self._callAsync_queue[cId]['result']=target(*args, **kwargs)
+            link['result']=target(*args, **kwargs)
          except Exception, e:
-            self._callAsync_queue[cId]['error']=e
-         self._callAsync_queue[cId]['inProgress']=False
+            print self._getErrorInfo()
+            link['error']=e
+         if cb:
+            cb(link['result'], link['error'], cbData)
+         link['inProgress']=False
          if not save:
-            e=self._callAsync_queue[cId]['error']
-            del self._callAsync_queue[cId]
+            e=link['error']
+            del link, self._callAsync_queue[cId]
             if e: raise e
       # call in native thread
-      self._callAsync_queue[cId]['_thread']=self._thread(tFunc_wrapper, args=[self, cId, target, args, kwargs, save], forceNative=True)
+      self._callAsync_queue[cId]['_thread']=self._thread(tFunc_wrapper, args=[self, cId, target, args, kwargs, save, cb, cbData], forceNative=forceNative)
       if not save: return
-      # init checker
-      def tFunc_checker(mytime=None, __cId=cId):
-         if self._callAsync_queue[cId]['inProgress']: return False, None, None
-         else:
-            res=self._callAsync_queue[__cId]['result']
-            err=self._callAsync_queue[__cId]['error']
-            del self._callAsync_queue[__cId]
-            if mytime:
-               self._speedStatsAdd('callAsync', getms()-mytime)
-            return True, res, err
       # return checker or get result
-      if returnChecker: return tFunc_checker
+      if returnChecker:
+         # init checker
+         def tFunc_checker(__cId=cId):
+            link=self._callAsync_queue[__cId]
+            if link['inProgress']: return False, None, None
+            else:
+               res=link['result']
+               err=link['error']
+               del link, self._callAsync_queue[__cId]
+               return True, res, err
+         return tFunc_checker
       else:
          # wait for completion and get result
-         while self._callAsync_queue[cId]['inProgress']: sleepMethod(sleepTime)
-         _, res, err=tFunc_checker(mytime)
+         link=self._callAsync_queue[cId]
+         while link['inProgress']: sleepMethod(sleepTime)
+         res=link['result']
+         err=link['error']
+         del link, self._callAsync_queue[cId]
+         self._speedStatsAdd('callAsync', getms()-mytime)
          # raise error or return result
          if err: raise err
          else: return res
@@ -695,8 +723,7 @@ class flaskJSONRPCServer:
       """
       This method returns correct socket class. For gevent return gevent's implementation.
       """
-      if not self.__settings['gevent']:
-         return socket
+      if not self.__settings['gevent']: return socket
       else:
          self._tryGevent()
          return geventSocket
@@ -731,34 +758,12 @@ class flaskJSONRPCServer:
             _sleep=gevent.sleep
       _sleep(s)
 
-   def _getScriptPath(self, full=False, real=True):
-      """
-      This method receives a way to a script. If <full> is False return only path, else return path and file name.
-
-      :param bool full:
-      :retunr str:
-      """
-      if full:
-         return os.path.realpath(sys.argv[0]) if real else sys.argv[0]
-      else:
-         return os.path.dirname(os.path.realpath(sys.argv[0]) if real else sys.argv[0])
-
-   def _getScriptName(self, withExt=False):
-      """
-      This method return name of current script. If <withExt> is True return name with extention.
-
-      :param bool withExt:
-      :return str:
-      """
-      if withExt: return os.path.basename(sys.argv[0])
-      else: return os.path.splitext(os.path.basename(sys.argv[0]))[0]
-
    def _findParentModule(self):
       """
       This method find parent module and pass him to attr <_parentModule> of server.
       """
       m=None
-      mainPath=self._getScriptPath(True, False)
+      mainPath=getScriptPath(True, False)
       for stk in reversed(inspect.stack()):
          # find frame of parent by module's path
          if mainPath!=stk[1]: continue
@@ -852,29 +857,30 @@ class flaskJSONRPCServer:
 
    def _speedStatsAdd(self, name, val):
       """
-      This methos write stats about passed <name>.
+      This methos write stats about passed <name>. You also can pass multiple names and values like list.
 
-      :param str name:
-      :param float val: time in milliseconds, that will be writed to stats.
+      :param str|list name:
+      :param float|list val: time in milliseconds, that will be writed to stats.
       """
-      names=name if isArray(name) else [name]
-      vals=val if isArray(val) else [val]
-      if len(names)!=len(vals):
-         self._throw('Wrong length')
-      for i, name in enumerate(names):
-         val=vals[i]
-         # if name not in self.speedStats: self.speedStats[name]=[]
-         # if name not in self.speedStatsMax: self.speedStatsMax[name]=0
-         # self.speedStats[name].append(val)
-         # if val>self.speedStatsMax[name]: self.speedStatsMax[name]=val
-         # if len(self.speedStats[name])>99999:
-         #    self.speedStats[name]=[self.speedStatsMax[name]]
-         if name not in self.speedStats: self.speedStats[name]=deque2([], 99999)
+      if isArray(name) and isArray(val):
+         names, vals=name, val
+         if len(names)!=len(vals):
+            self._throw('Wrong length')
+         for i, name in enumerate(names):
+            val=vals[i]
+            if name not in self.speedStats:
+               self.speedStats[name]=deque2([], 99999)
+            self.speedStats[name].append(val)
+            if name not in self.speedStatsMax: self.speedStatsMax[name]=val
+            elif val>self.speedStatsMax[name]: self.speedStatsMax[name]=val
+      else:
+         if name not in self.speedStats:
+            self.speedStats[name]=deque2([], 99999)
          self.speedStats[name].append(val)
          if name not in self.speedStatsMax: self.speedStatsMax[name]=val
          elif val>self.speedStatsMax[name]: self.speedStatsMax[name]=val
 
-   def registerInstance(self, dispatcher, path='/', fallback=None, dispatcherBackend=None, notifBackend=None, also=None):
+   def registerInstance(self, dispatcher, path='/', fallback=None, dispatcherBackend=None, notifBackend=None, includePrivate=None, filter=None):
       """
       This method Create dispatcher for methods of given class's instance.
       If methods has attribute _alias(List or String), it used as aliases of name.
@@ -884,13 +890,14 @@ class flaskJSONRPCServer:
       :param bool|string fallback: Switch JSONP-mode fot this dispatchers.
       :param str|obj dispatcherBackend: Set specific backend for this dispatchers.
       :param str|obj notifBackend: Set specific backend for this dispatchers.
-      :param list|None also: By default this method ignore private and special methods of instance. If you want to include some of them, pass theirs names.
+      :param list|None includePrivate: By default this method ignore private and special methods of instance. If you want to include some of them, pass theirs names.
+      :param func filter: If this param passed, this function will be called for every method of instance. It must return tuple(<use>, <name>, <link>), and only methods with <use> is True will be registered. This param also disable ignoring private and special methods of instance, so param <includePrivate> also will be disabled.
       """
       if self._inChild():
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       if not isInstance(dispatcher):
          self._throw('Bad dispatcher type: %s'%type(dispatcher))
-      also=also or tuple()
+      includePrivate=includePrivate or tuple()
       fallback=self.__settings['fallback_JSONP'] if fallback is None else fallback
       path=self._formatPath(path)
       if path not in self.routes: self.routes[path]={}
@@ -902,16 +909,23 @@ class flaskJSONRPCServer:
       else: nBckId=self._registerExecBackend(notifBackend, notif=True)
       # add dispatcher to routes
       for name in dir(dispatcher):
-         if name[0]=='_' and name not in also: continue  #skip private and special methods
          link=getattr(dispatcher, name)
+         if filter:
+            s, name, link=filter(dispatcher, name, link)
+            if not s: continue
+         elif name[0]=='_' and name not in includePrivate: continue  #skip private and special methods
          if isFunction(link):
-            self.routes[path][name]={'allowJSONP':fallback, 'link':link, 'dispatcherBackendId':dBckId, 'notifBackendId':nBckId}
+            # extract arguments
+            _args, _, _, _=inspect.getargspec(link)
+            _args=tuple([s for i, s in enumerate(_args) if not(i==0 and s=='self')])
+            # add dispatcher to routes
+            self.routes[path][name]={'allowJSONP':fallback, 'link':link, 'dispatcherBackendId':dBckId, 'notifBackendId':nBckId, 'args':_args}
             link.__func__._id={'path':path, 'name':name} #save path for dispatcher in routes
             if hasattr(link, '_alias'):
                tArr1=link._alias if isArray(link._alias) else [link._alias]
                for alias in tArr1:
                   if isString(alias):
-                     self.routes[path][alias]={'allowJSONP':fallback, 'link':link, 'dispatcherBackendId':dBckId, 'notifBackendId':nBckId}
+                     self.routes[path][alias]={'allowJSONP':fallback, 'link':link, 'dispatcherBackendId':dBckId, 'notifBackendId':nBckId, 'args':_args}
 
    def registerFunction(self, dispatcher, path='/', fallback=None, name=None, dispatcherBackend=None, notifBackend=None):
       """
@@ -938,12 +952,15 @@ class flaskJSONRPCServer:
       # select Notif-backend
       if notifBackend is None: nBckId=self.defaultNotifBackendId
       else: nBckId=self._registerExecBackend(notifBackend, notif=True)
+      # extract arguments
+      _args, _, _, _=inspect.getargspec(dispatcher)
+      _args=tuple([s for i, s in enumerate(_args) if not(i==0 and s=='self')])
       # add dispatcher to routes
-      self.routes[path][name]={'allowJSONP':fallback, 'link':dispatcher, 'dispatcherBackendId':dBckId, 'notifBackendId':nBckId}
+      self.routes[path][name]={'allowJSONP':fallback, 'link':dispatcher, 'dispatcherBackendId':dBckId, 'notifBackendId':nBckId, 'args':_args}
       if hasattr(dispatcher, '__func__'):
          dispatcher.__func__._id={'path':path, 'name':name}  #save path for dispatcher in routes
       else:
-         dispatcher._id={'path':path, 'name':name} #save path for dispatcher in routes
+         dispatcher._id={'path':path, 'name':name}  #save path for dispatcher in routes
       if hasattr(dispatcher, '_alias'):
          tArr1=dispatcher._alias if isArray(dispatcher._alias) else [dispatcher._alias]
          for alias in tArr1:
@@ -952,15 +969,17 @@ class flaskJSONRPCServer:
 
    def _formatPath(self, path=''):
       """
-      This method format path and add trailing slash.
+      This method format path and add trailing slashs.
 
       :params str path:
       :return str:
       """
-      path=path or '/'
-      path=path if path.startswith('/') else '/'+path
-      path=path if path.endswith('/') else path+'/'
-      return path
+      if not path:
+         return '/'
+      else:
+         path=path if path[0]=='/' else '/'+path
+         path=path if path[-1]=='/' else path+'/'
+         return path
 
    def _parseJSON(self, data):
       """
@@ -985,13 +1004,18 @@ class flaskJSONRPCServer:
          mytime=getms()
          tArr1=self._parseJSON(data)
          tArr2=[]
-         tArr1=tArr1 if isArray(tArr1) else [tArr1] #support for batch requests
+         tArr1=tArr1 if isArray(tArr1) else (tArr1, ) #support for batch requests
          for r in tArr1:
             correctId=None
             if 'id' in r:
                # if in request exists key "id" but it's "null", we process him like correct request, not notify-request
                correctId=0 if r['id'] is None else r['id']
-            tArr2.append({'jsonrpc':r.get('jsonrpc', None), 'method':r.get('method', None), 'params':r.get('params', None), 'id':correctId})
+            tArr2.append({
+               'jsonrpc': r['jsonrpc'] if 'jsonrpc' in r else None,
+               'method': r['method'] if 'method' in r else None,
+               'params': r['params'] if 'params' in r else None,
+               'id':correctId
+            })
          self._speedStatsAdd('parseRequest', getms()-mytime)
          return True, tArr2
       except Exception, e:
@@ -1007,21 +1031,23 @@ class flaskJSONRPCServer:
       :param bool isError: Switch response's format.
       :return dict:
       """
-      id=data.get('id', None)
-      if 'id' in data: del data['id']
+      if 'id' in data:
+         _id=data['id']
+         del data['id']
+      else: _id=None
       if isError:
-         s={"jsonrpc": "2.0", "error": data, "id": id}
+         s={"jsonrpc": "2.0", "error": data, "id": _id}
       elif id:
-         s={"jsonrpc": "2.0", "result": data['data'], "id": id}
+         s={"jsonrpc": "2.0", "result": data['data'], "id": _id}
       return s
 
    def _fixJSON(self, o):
       """
       This method can be called by JSON-backend and process special types.
       """
-      if isinstance(o, decimal.Decimal): return str(o) #fix Decimal conversion
-      elif isinstance(o, (datetime.datetime, datetime.date, datetime.time)): return o.isoformat() #fix DateTime conversion
-      # elif isNum(o) and o>2**31: return str(o) #? fix LONG
+      if isinstance(o, decimal.Decimal): return str(o)  #fix Decimal conversion
+      elif isinstance(o, (datetime.datetime, datetime.date, datetime.time)): return o.isoformat()  #fix DateTime conversion
+      # elif isNum(o) and o>=sys.maxint: return str(o) #? fix LONG
 
    def _serializeJSON(self, data):
       """
@@ -1033,9 +1059,8 @@ class flaskJSONRPCServer:
       def _fixJSON(o):
          if isFunction(self.fixJSON): return self.fixJSON(o)
       mytime=getms()
-      #! без экранирования кавычек такой хак поломает парсер
-      # if isString(data) and not getattr(self.jsonBackend, '_skipFastStringSerialize', False):
-      #    data='"'+data+'"' #!
+      #! без экранирования кавычек такой хак поломает парсер, кроме того он мешает поддерживать не-JSON парсеры
+      # if isString(data) and not getattr(self.jsonBackend, '_skipFastStringSerialize', False): data='"'+data+'"'
       data=self.jsonBackend.dumps(data, indent=None, separators=(',',':'), ensure_ascii=True, sort_keys=False, default=_fixJSON)
       self._speedStatsAdd('serializeJSON', getms()-mytime)
       return data
@@ -1064,10 +1089,10 @@ class flaskJSONRPCServer:
       """
       res={'connPerSec_now':round(self.connPerMinute['count']/60.0, 2), 'connPerSec_old':round(self.connPerMinute['oldCount']/60.0, 2), 'connPerSec_max':round(self.connPerMinute['maxCount']/60.0, 2), 'speedStats':{}, 'processingRequestCount':self.processingRequestCount, 'processingDispatcherCount':self.processingDispatcherCount}
       if history and isNum(history):
-         history*=-1
+         l=history*-1
          res['connPerSec_history']={
-            'minute':list(self.connPerMinute['history']['minute'])[history:],
-            'count':list(self.connPerMinute['history']['count'])[history:]
+            'minute':list(self.connPerMinute['history']['minute'])[l:],
+            'count':list(self.connPerMinute['history']['count'])[l:]
          }
       elif history:
          res['connPerSec_history']={
@@ -1084,8 +1109,10 @@ class flaskJSONRPCServer:
          res['speedStats'][k+'_max2']=round(v3/1000.0, 1) if not inMS else round(v3, 1)
       #get backend's stats
       for _id, backend in self.execBackend.iteritems():
-         if hasattr(backend, 'stats'): r=backend.stats(inMS=inMS)
-         elif 'stats' in backend: r=backend['stats'](inMS=inMS)
+         if hasattr(backend, 'stats'):
+            r=backend.stats(inMS=inMS, history=history)
+         elif 'stats' in backend:
+            r=backend['stats'](inMS=inMS, history=history)
          else: continue
          res.update(r)
       return res
@@ -1097,12 +1124,12 @@ class flaskJSONRPCServer:
       :param int level: Info-level of message. 0 is critical (and visible always), 1 is error, 2 is warning, 3 is info, 4 is debug. If is not number, it passed as first part of message.
       """
       level, args=prepDataForLogger(level, args)
-      if level!=0 and level is not None: # non-critical or non-fallback msg
+      if level!=0 and level is not None:  #non-critical or non-fallback msg
          loglevel=self.__settings['log']
          if not loglevel: return
          elif loglevel is True: pass
          elif level>loglevel: return
-      levelPrefix=['', 'ERROR:', 'WARNING:', 'INFO:', 'DEBUG:']
+      levelPrefix=('', 'ERROR:', 'WARNING:', 'INFO:', 'DEBUG:')
       _write=sys.stdout.write
       _repr=self._serializeJSON
       for i, s in enumerate(args):
@@ -1120,9 +1147,10 @@ class flaskJSONRPCServer:
                except UnicodeEncodeError:
                   _write(s.encode('utf8'))
             except Exception, e:
-               _write('<UNPRINTABLE_DATA> %s'%e)
+               _write('<UNPRINTABLE_DATA: %s>'%e)
          if i<len(args)-1: _write(' ')
       _write('\n')
+      sys.stdout.flush()
 
    def lock(self, dispatcher=None):
       """
@@ -1132,8 +1160,8 @@ class flaskJSONRPCServer:
       """
       if self._inChild():
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
-      if dispatcher is None: self.locked=True #global lock
-      else: #local lock
+      if dispatcher is None: self.locked=True  #global lock
+      else:  #local lock
          if isFunction(dispatcher):
             if hasattr(dispatcher, '__func__'):
                setattr(dispatcher.__func__, '__locked', True)
@@ -1145,14 +1173,18 @@ class flaskJSONRPCServer:
       This method unlocking server or specific <dispatcher>.
       If all server locked, you can unlock specific <dispatcher> by pass <exclusive> to True.
 
+      :Attention:
+
+      If you use exclusive unlocking, don't forget to switch locking-status to normal state after all done. For doing this simply call this method for exclusivelly locked dispatcher with <exclusive=False> flag (or without passing <exclusive> flag). This will automatically reset status of exclusive unlocking for given <dispatcher>.
+
       :param func dispatcher:
       :param bool exclusive:
       """
       if self._inChild():
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       #exclusive=True unlock dispatcher also if global lock=True
-      if dispatcher is None: self.locked=False #global lock
-      else: #local lock
+      if dispatcher is None: self.locked=False  #global lock
+      else:  #local lock
          if isFunction(dispatcher):
             if hasattr(dispatcher, '__func__'):
                setattr(dispatcher.__func__, '__locked', False if exclusive else None)
@@ -1173,31 +1205,31 @@ class flaskJSONRPCServer:
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       mytime=getms()
       sleepMethod=sleepMethod or self._sleep
-      if dispatcher is None: #global lock
+      if dispatcher is None:  #global lock
          while self.locked:
             if returnStatus:
                self._speedStatsAdd('wait', getms()-mytime)
                return True
-            sleepMethod(self.__settings['sleepTime_waitLock']) #global lock
-      else: #local and global lock
-         if isFunction(dispatcher):
-            while True:
-               if hasattr(dispatcher, '__func__'):
-                  locked=getattr(dispatcher.__func__, '__locked', None)
-               else:
-                  locked=getattr(dispatcher, '__locked', None)
-               if locked is False: break #exclusive unlock
-               elif not locked and not self.locked: break
-               if returnStatus:
-                  self._speedStatsAdd('wait', getms()-mytime)
-                  return True
-               sleepMethod(self.__settings['sleepTime_waitLock'])
+            sleepMethod(self.__settings['sleepTime_waitLock'])  #global lock
+      else:  #local and global lock
+         if hasattr(dispatcher, '__func__'): dispatcher=dispatcher.__func__
+         while True:
+            # local
+            locked=getattr(dispatcher, '__locked', None)
+            # global
+            if locked is False: break  #exclusive unlock
+            elif not locked and not self.locked: break
+            if returnStatus:
+               self._speedStatsAdd('wait', getms()-mytime)
+               return True
+            sleepMethod(self.__settings['sleepTime_waitLock'])
       self._speedStatsAdd('wait', getms()-mytime)
       if returnStatus: return False
 
    def _deepLock(self):
       """
-      This method locks the server completely, the server doesn't process requests.
+      This method locks the server completely.
+      While locked, server doesn't process requests, but receives them. All request will wait, until server unlocked.
       """
       if self._inChild():
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
@@ -1295,7 +1327,7 @@ class flaskJSONRPCServer:
       api=[]
       for o in api2:
          if not isDict(o): continue
-         scriptPath=o.get('scriptPath', self._getScriptPath(True))
+         scriptPath=o.get('scriptPath', getScriptPath(True))
          scriptName=o.get('scriptName', '')
          dispatcherName=o.get('dispatcher', '')
          isInstance=o.get('isInstance', False)
@@ -1312,7 +1344,7 @@ class flaskJSONRPCServer:
             else:
                if '%s_%s'%(scriptName, scriptPath) not in mArr:
                   mArr['%s_%s'%(scriptName, scriptPath)]={'module':imp.load_source(scriptName, scriptPath), 'dArr':{}}
-                  if scriptPath==self._getScriptPath(True) or scriptPath==self._getScriptPath(True, False):
+                  if scriptPath==getScriptPath(True) or scriptPath==getScriptPath(True, False):
                      # passed parent module
                      self._parentModule=mArr['%s_%s'%(scriptName, scriptPath)]['module']
                module=mArr['%s_%s'%(scriptName, scriptPath)]['module']
@@ -1399,7 +1431,12 @@ class flaskJSONRPCServer:
       :param str parallelId: Optional parametr. Can be passed by ExecBackend and contain identificator of process or thread, that processing this request.
    """
 
-   def _callDispatcher(self, uniqueId, data, request, isJSONP=False, nativeThread=None, overload=None):
+   def _addMagicVarOverloader(self, f):
+      if not isFunction(f):
+         self._throw('You must pass function, passed %s'%type(f))
+      self._magicVarForDispatcherOverload.append(f)
+
+   def _callDispatcher(self, uniqueId, data, request, isJSONP=False, nativeThread=None, overload=None, ignoreLocking=False):
       """
       This method call dispatcher, requested by client.
 
@@ -1410,20 +1447,37 @@ class flaskJSONRPCServer:
       :param bool nativeThread:
       :param dict|func overload: Overload magicVarForDispatcher param.
       """
+      argsPassed=locals()
       params={}
       try:
          mytime=getms()
          self.processingDispatcherCount+=1
          self._gcStats['processedDispatcherCount']+=1
-         _sleep=lambda s, forceNative=nativeThread: self._sleep(s, forceNative=forceNative)
-         currentDispatcher=self.routes[request['path']][data['method']]['link']
-         _args, _, _, _=inspect.getargspec(currentDispatcher)
-         _args=[s for i, s in enumerate(_args) if not(i==0 and s=='self')]
-         if isDict(data['params']): params=data['params']
-         elif isArray(data['params']): #convert *args to **kwargs
+         if nativeThread:
+            def tFunc_sleep(s, forceNative=True):
+               self._sleep(s, forceNative=forceNative)
+         else:
+            tFunc_sleep=self._sleep
+         currentDispatcher=self.routes[request['path']][data['method']]
+         currentDispatcherLink=currentDispatcher['link']
+         _args=self.routes[request['path']][data['method']]['args']
+         if isDict(data['params']):
+            params=data['params']
+         elif isArray(data['params']):  #convert *args to **kwargs
             for i, v in enumerate(data['params']): params[_args[i]]=v
          magicVarForDispatcher=self.__settings['magicVarForDispatcher']
-         if magicVarForDispatcher in _args: #add connection info if needed
+         if magicVarForDispatcher in _args:  #add magicVarForDispatcher if requested
+            # link to current execBackend
+            if data['id'] is None:
+               currentExecBackendId=currentDispatcher['notifBackendId']
+            else:
+               currentExecBackendId=currentDispatcher['dispatcherBackendId']
+            if currentExecBackendId in self.execBackend:
+               currentExecBackend=self.execBackend[currentDispatcher['dispatcherBackendId']]
+            else:
+               currentExecBackend=None
+               currentExecBackendId='simple'
+            # create magicVarForDispatcher
             params[magicVarForDispatcher]={
                'headers':request['headers'],
                'cookies':request['cookies'],
@@ -1438,33 +1492,40 @@ class flaskJSONRPCServer:
                'serverName':self.name,
                'servedBy':request['servedBy'],
                'call':magicDict({
-                  'lockThis':lambda: self.lock(dispatcher=currentDispatcher),
-                  'unlockThis':lambda exclusive=False: self.unlock(dispatcher=currentDispatcher, exclusive=exclusive),
-                  'waitThis':lambda returnStatus=False: self.wait(dispatcher=currentDispatcher, sleepMethod=_sleep, returnStatus=returnStatus),
+                  'lockThis':lambda: self.lock(dispatcher=currentDispatcherLink),
+                  'unlockThis':lambda exclusive=False: self.unlock(dispatcher=currentDispatcherLink, exclusive=exclusive),
+                  'waitThis':lambda returnStatus=False: self.wait(dispatcher=currentDispatcherLink, sleepMethod=tFunc_sleep, returnStatus=returnStatus),
                   'lock':self.lock,
                   'unlock':self.unlock,
-                  'wait':lambda dispatcher=None, returnStatus=False: self.wait(dispatcher=dispatcher, sleepMethod=_sleep, returnStatus=returnStatus),
-                  'sleep':_sleep,
+                  'wait':lambda dispatcher=None, returnStatus=False: self.wait(dispatcher=dispatcher, sleepMethod=tFunc_sleep, returnStatus=returnStatus),
+                  'sleep':tFunc_sleep,
                   'log':self._logger
                }),
                'nativeThread':nativeThread if nativeThread is not None else not(self.__settings['gevent']),
                'notify':data['id'] is None,
-               'dispatcher':currentDispatcher,
+               'request':data,
+               'dispatcher':currentDispatcherLink,
                'path':request['path'],
-               'dispatcherName':data['method']
+               'dispatcherName':data['method'],
+               'execBackend':currentExecBackend,
+               'execBackendId':currentExecBackendId
             }
-            # overload _connection
+            # overload magicVarForDispatcher (passed)
             if overload and isDict(overload):
                for k, v in overload.iteritems(): params[magicVarForDispatcher][k]=v
             elif overload and isFunction(overload):
                params[magicVarForDispatcher]=overload(params[magicVarForDispatcher])
+            # overload magicVarForDispatcher (global)
+            if self._magicVarForDispatcherOverload:
+               for f in self._magicVarForDispatcherOverload:
+                  params[magicVarForDispatcher]=f(params[magicVarForDispatcher], argsPassed, currentExecBackendId, currentExecBackend)
             params[magicVarForDispatcher]=magicDict(params[magicVarForDispatcher])
          self._speedStatsAdd('callDispatcherPrepare', getms()-mytime)
-         #locking
-         self.wait(dispatcher=currentDispatcher, sleepMethod=_sleep)
-         #call dispatcher
+         if not ignoreLocking:  #locking
+            self.wait(dispatcher=currentDispatcherLink, sleepMethod=tFunc_sleep)
+         # call dispatcher
          mytime=getms()
-         result=currentDispatcher(**params)
+         result=currentDispatcherLink(**params)
          self._speedStatsAdd('callDispatcher', getms()-mytime)
          self.processingDispatcherCount-=1
          return True, params, result
@@ -1514,10 +1575,11 @@ class flaskJSONRPCServer:
 
    def _compressResponse(self, headers, data):
       """
-      This method compress responce.
+      This method compress responce and add compression-headers.
 
-      :param Response() resp: Response object, prepared by WSGI backend.
-      :return Response():
+      :param list headers: List of headers of response, that can be modified.
+      :param str data: Response data, that will be compressed.
+      :return tuple(headers, data):
       """
       data=self._compressGZIP(data)
       headers.append(('Content-Encoding', 'gzip'))
@@ -1684,6 +1746,7 @@ class flaskJSONRPCServer:
       :param dict cookies: Pass cookies here if needed.
       :param bool notify: Is this a notify-request.
       """
+      #! симуляция не поддерживает постпроцессеры
       if self._inChild():
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       d={"jsonrpc": "2.0", "method": dispatcherName, "params": args or []}
@@ -1726,7 +1789,7 @@ class flaskJSONRPCServer:
          'servedBy':(None, None, None),
          'ip':'localhost',
          'data':[d],
-         'dataPrint':'',  #!add correct
+         'dataPrint':'',  #! add correct
          'fake':True
       }
       # add headers to environ
@@ -1758,6 +1821,8 @@ class flaskJSONRPCServer:
 
       :param dict env:
       :param func start_response:
+      :param bool prepRequest: If this True, environ will be prepared via <server>._prepRequestContext().
+      :return tuple: Response as iterator.
       """
       if self._inChild():
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
@@ -1786,20 +1851,20 @@ class flaskJSONRPCServer:
       # processing request
       try:
          request=self._prepRequestContext(env) if prepRequest else env
-         status, headers, data=self._requestProcess(request)
+         status, headers, data, dataRaw=self._requestProcess(request)
       except Exception:
-         s=self._getErrorInfo()
-         self._logger(1, 'ERROR processing request: %s'%(s))
-         status, headers, data=(500, {}, s)
+         e=self._getErrorInfo()
+         self._logger(1, 'ERROR processing request: %s'%e)
+         status, headers, data, dataRaw=(500, {}, e, None)
       if self.__settings['postprocess']:
-         # call postprocess wsgi
+         # call postprocessers
          try:
             pp=postprocess(self, self.__settings['postprocess'])
-            status, headers, data=pp(request, status, headers, data)
+            status, headers, data=pp(request, status, headers, data, dataRaw)
          except Exception:
-            s=self._getErrorInfo()
-            self._logger(1, 'ERROR in postprocess: %s'%(s))
-            status, headers, data=(500, {}, s)  #also convert string-data to iterator
+            e=self._getErrorInfo()
+            self._logger(1, 'ERROR in postprocess: %s'%e)
+            status, headers, data=(500, {}, e)
       # convert status to http-status
       if not isString(status): status=self._toHttpStatus(status)
       # convert string-data to iterator
@@ -1818,16 +1883,16 @@ class flaskJSONRPCServer:
       This method implement all logic of proccessing requests.
 
       :param dict request:
-      :return tuple(int(code), dict(headers), str(data)):
+      :return tuple(int(code), dict(headers), str(data), object(dataRaw)):
       """
       if self._inChild():
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       # process only (GET, POST, OPTIONS) requests
       if request['method'] not in ('GET', 'POST', 'OPTIONS'):
          self._logger(3, 'Unsupported method:', request['method'])
-         return (405, {}, 'Method Not Allowed')
+         return (405, {}, 'Method Not Allowed', None)
       # to local vars
-      isFake='fake' in request
+      isFake='fake' in request and request['fake']
       request_method=request['method']
       request_path=request['path']
       request_fileName=request['fileName']
@@ -1841,16 +1906,17 @@ class flaskJSONRPCServer:
          tArr=request_path[1:-1].split('/')
          if not tArr[-1]:
             self._throw('Incorrect path for GET request: %s'%request_path)
-         request_fileName=tArr[-1]
-         request_path=self._formatPath('/'.join(tArr[:-1]))
+         request_fileName=request['fileName']=tArr[-1]
+         request_path=request['path']=self._formatPath('/'.join(tArr[:-1]))
       # don't process request with unknown path
       if request_path not in self.routes:
          self._logger(3, 'Unknown path:', request_path)
-         return (404, {}, 'Not Found')
+         return (404, {}, 'Not Found', None)
       # start processing request
       outHeaders={}
       outCookies=[]
       dataOut=[]
+      dataRaw={'rpcError':None, 'result':[]}
       allowCompress=self.__settings['allowCompress']
       mimeType=None
       # get post data
@@ -1862,7 +1928,7 @@ class flaskJSONRPCServer:
       if self.__settings['auth'] and isFunction(self.__settings['auth']):
          if self.__settings['auth'](self, request) is not True:
             self._logger(3, 'Access denied:', request_url, request_method, request_dataPrint or request_data)
-            return (403, {}, 'Forbidden')
+            return (403, {}, 'Forbidden', None)
       # CORS
       if self.__settings['CORS']:
          outHeaders['Access-Control-Allow-Headers']='Origin, Authorization, X-Requested-With, Content-Type, Accept'
@@ -1897,37 +1963,44 @@ class flaskJSONRPCServer:
                   else: self._sleep(self.__settings['antifreeze_batchSleep'])
                   procTime=getms()
                # try to process request
-               if not dataIn['jsonrpc'] or not dataIn['method'] or (dataIn['params'] and not(isDict(dataIn['params'])) and not(isArray(dataIn['params']))): #syntax error in request
+               if not dataIn['jsonrpc'] or not dataIn['method'] or (dataIn['params'] and not(isDict(dataIn['params'])) and not(isArray(dataIn['params']))):  #syntax error in request
                   error.append({"code": -32600, "message": "Invalid Request"})
-               elif dataIn['method'] not in self.routes[request_path]: #call of uncknown method
+               elif dataIn['method'] not in self.routes[request_path]:  #call of uncknown method
                   error.append({"code": -32601, "message": "Method not found", "id":dataIn['id']})
-               else: #process correct request
+               else:  #process correct request
                   # generate unique id
                   uniqueId='%s--%s--%s--%s--%s--%i--%i'%(dataIn['method'], dataIn['id'], request_ip, self._sha1(request_data), getms(), random.random()*sys.maxint, random.random()*sys.maxint)
-                  # uniqueId='--'.join([dataIn['method'], str(dataIn['id']), randomEx(), randomEx(), request_ip, self._sha1(request_data), str(getms())])
                   # select dispatcher
                   dispatcher=self.routes[request_path][dataIn['method']]
-                  # select backend for executing
+                  #select backend for executing
                   if dataIn['id'] is None:
-                     #notification request
+                     # notification request
                      execBackend=self.execBackend[dispatcher['notifBackendId']] if dispatcher['notifBackendId'] in self.execBackend else None
                      if execBackend and hasattr(execBackend, 'add'):
+                        #! нужно поменять выходной формат для совместимости с light-backend
                         status, m, dataForBackend=execBackend.add(uniqueId, dataIn, request)
                         if not status:
                            self._logger(1, 'Error in notifBackend.add(): %s'%m)
                      else:
                         status, _, _=self._callDispatcher(uniqueId, dataIn, request)
                   else:
-                     #simple request
+                     # simple request
                      execBackend=self.execBackend[dispatcher['dispatcherBackendId']] if dispatcher['dispatcherBackendId'] in self.execBackend else None
-                     if execBackend and hasattr(execBackend, 'add') and hasattr(execBackend, 'check'):
-                        # copy request's context
-                        status, m, dataForBackend=execBackend.add(uniqueId, dataIn, request)
-                        if not status:
-                           self._logger(1, 'Error in dispatcherBackend.add(): %s'%m)
-                           result='Error in dispatcherBackend.add(): %s'%m
+                     if execBackend:
+                        if hasattr(execBackend, 'check'):
+                           # full-backend with 'add' and 'check'
+                           status, m, dataForBackend=execBackend.add(uniqueId, dataIn, request)
+                           if not status:
+                              self._logger(1, 'Error in dispatcherBackend.add(): %s'%m)
+                              result='Error in dispatcherBackend.add(): %s'%m
+                           else:
+                              status, params, result=execBackend.check(uniqueId, dataForBackend)
                         else:
-                           status, params, result=execBackend.check(uniqueId, dataForBackend)
+                           # light-backend with 'add' only
+                           status, params, result=execBackend.add(uniqueId, dataIn, request)
+                           if not status:
+                              self._logger(1, 'Error in dispatcherBackend.add(): %s'%result)
+                              result='Error in dispatcherBackend.add(): %s'%result
                      else:
                         status, params, result=self._callDispatcher(uniqueId, dataIn, request)
                      if status:
@@ -1938,61 +2011,81 @@ class flaskJSONRPCServer:
                               outHeaders.update(magicVar['headersOut'])
                            if magicVar['cookiesOut']:
                               outCookies+=magicVar['cookiesOut']
-                           if self.__settings['allowCompress'] and magicVar['allowCompress'] is False: allowCompress=False
+                           if self.__settings['allowCompress'] and magicVar['allowCompress'] is False:
+                              allowCompress=False
                            elif self.__settings['allowCompress'] is False and magicVar['allowCompress']: allowCompress=True
                            mimeType=str(magicVar['mimeType'])  #avoid unicode
                         out.append({"id":dataIn['id'], "data":result})
                      else:
-                        error.append({"code": 500, "message": result, "id":dataIn['id']})
+                        error.append({"code": -32603, "message": result, "id":dataIn['id']})
          # prepare output for response
          if error: self._logger(4, 'ERRORS:', error)
          self._logger(4, 'OUT:', out)
          if len(error):
-            if isDict(error): #error of parsing
+            if isDict(error):  #error of parsing
+               dataRaw['result'].append(error)
+               dataRaw['rpcError']=[error['code']]
                dataOut=self._prepResponse(error, isError=True)
-            elif len(dataInList)>1: #error for batch request
-               for d in error: dataOut.append(self._prepResponse(d, isError=True))
-            else: #error for simple request
+            elif len(dataInList)>1:  #error for batch request
+               dataRaw['result']+=error
+               dataRaw['rpcError']=[]
+               for d in error:
+                  dataRaw['result'].append(d)
+                  if d['code'] not in dataRaw['rpcError']:
+                     dataRaw['rpcError'].append(d['code'])
+                  dataOut.append(self._prepResponse(d, isError=True))
+            else:  #error for simple request
+               dataRaw['result'].append(error[0])
                dataOut=self._prepResponse(error[0], isError=True)
+               dataRaw['rpcError']=[error[0]['code']]
          if len(out):
-            if len(dataInList)>1: #response for batch request
-               for d in out: dataOut.append(self._prepResponse(d, isError=False))
-            else: #response for simple request
+            dataRaw['result']+=out
+            if len(dataInList)>1:  #response for batch request
+               for d in out:
+                  dataOut.append(self._prepResponse(d, isError=False))
+            else:  #response for simple request
                dataOut=self._prepResponse(out[0], isError=False)
          if not isFake:
             dataOut=self._serializeJSON(dataOut)
-      elif request_method=='GET': #JSONP fallback
+      elif request_method=='GET':  #JSONP fallback
          out=None
          self._logger(4, 'REQUEST:', request_fileName, request_args)
          jsonpCB=request_args.get('jsonp', False)
          jsonpCB='%s(%%s);'%(jsonpCB) if jsonpCB else '%s;'
-         if request_fileName not in self.routes[request_path]: #call of unknown method
-            out="""{"error":{"code": -32601, "message": "Method not found"}}"""
-         elif not self.routes[request_path][request_fileName]['allowJSONP']: #fallback to JSONP denied
+         if request_fileName not in self.routes[request_path]:  #call of unknown method
+            out={"error":{"code": -32601, "message": "Method not found"}}
+         elif not self.routes[request_path][request_fileName]['allowJSONP']:  #fallback to JSONP denied
             self._logger(2, 'JSONP_DENIED:', request_path, request_fileName)
-            return (403, {}, 'JSONP_DENIED')
-         else: #process correct request
+            return (403, {}, 'JSONP_DENIED', None)
+         else:  #process correct request
             if 'jsonp' in request_args: del request_args['jsonp']
             # generate unique id
-            uniqueId='%s--%s--%s--%s--%i--%i'%(request_fileName, request_ip, self._sha1(request_args), getms(), random.random()*sys.maxint, random.random()*sys.maxint)
-            # uniqueId='--'.join([request_fileName, randomEx(), randomEx(), request_ip, str(getms())])
+            uniqueId='%s--%s--%s--%s--%i--%i'%(request_fileName, request_ip, self._sha1(self._serializeJSON(request_args)), getms(), random.random()*sys.maxint, random.random()*sys.maxint)
             # <id> passed like for normal request
             dataIn={'method':request_fileName, 'params':request_args, 'id':uniqueId}
             # select dispatcher
             dispatcher=self.routes[request_path][dataIn['method']]
             # select backend for executing
             execBackend=self.execBackend[dispatcher['dispatcherBackendId']] if dispatcher['dispatcherBackendId'] in self.execBackend else None
-            if execBackend and hasattr(execBackend, 'add') and hasattr(execBackend, 'check'):
-               status, m, dataForBackend=execBackend.add(uniqueId, dataIn, request, isJSONP=jsonpCB)
-               if not status:
-                  self._logger(1, 'Error in dispatcherBackend.add(): %s'%m)
-                  result='Error in dispatcherBackend.add(): %s'%m
+            if execBackend:
+               if hasattr(execBackend, 'check'):
+                  # full backend with 'add' and 'check'
+                  status, m, dataForBackend=execBackend.add(uniqueId, dataIn, request, isJSONP=jsonpCB)
+                  if not status:
+                     self._logger(1, 'Error in dispatcherBackend.add(): %s'%m)
+                     result='Error in dispatcherBackend.add(): %s'%m
+                  else:
+                     status, params, result=execBackend.check(uniqueId, dataForBackend)
                else:
-                  status, params, result=execBackend.check(uniqueId, dataForBackend)
+                  # light backend with 'add' only
+                  status, params, result=execBackend.add(uniqueId, dataIn, request, isJSONP=jsonpCB)
+                  if not status:
+                     self._logger(1, 'Error in dispatcherBackend.add(): %s'%result)
+                     result='Error in dispatcherBackend.add(): %s'%result
             else:
                status, params, result=self._callDispatcher(uniqueId, dataIn, request, isJSONP=jsonpCB)
             if status:
-               if self.__settings['magicVarForDispatcher'] in params: #get additional headers and cookies
+               if self.__settings['magicVarForDispatcher'] in params:  #get additional headers and cookies
                   magicVar=dict(params[self.__settings['magicVarForDispatcher']])
                   if magicVar['headersOut']:
                      outHeaders.update(magicVar['headersOut'])
@@ -2004,17 +2097,25 @@ class flaskJSONRPCServer:
                   jsonpCB=magicVar['jsonp']
                out=result
             else:
-               out=result
+               out={"error":{"code": -32603, "message": result}}
+               dataRaw['rpcError']=[-32603]
+         dataRaw['result'].append(out)
          # prepare output for response
          self._logger(4, 'OUT:', out)
          out=self._serializeJSON(out)
          dataOut=jsonpCB%(out)
       self._logger(4, 'RESPONSE:', dataOut)
       mimeType=mimeType or self._calcMimeType(request)
+      allowCompress=not isFake and allowCompress and len(dataOut)>=self.__settings['compressMinSize'] and 'gzip' in request['headers'].get('Accept-Encoding', '').lower()
+      dataRaw['mimeType']=mimeType
+      dataRaw['allowCompress']=allowCompress
+      dataRaw['isFake']=isFake
+      dataRaw['outHeaders']=outHeaders
+      dataRaw['outCookies']=outCookies
       if isDict(outHeaders):
          if 'Content-Type' not in outHeaders: outHeaders['Content-Type']=mimeType
          outHeaders=outHeaders.items()
-      else: # for future, now only dict supported
+      else:  #for future use, now only dict supported
          outHeaders.append(('Content-Type', mimeType))
       if outCookies:
          # set cookies
@@ -2025,7 +2126,7 @@ class flaskJSONRPCServer:
             cookies[c['name']]['expires']=c.get('expires', 2147483647)
             cookies[c['name']]['path']=c.get('domain', '*')
             outHeaders.append(('Set-Cookie', cookies[c['name']].OutputString()))
-      if not isFake and allowCompress and len(dataOut)>=self.__settings['compressMinSize'] and 'gzip' in request['headers'].get('Accept-Encoding', '').lower():
+      if allowCompress:
          # with compression
          mytime=getms()
          try:
@@ -2033,7 +2134,7 @@ class flaskJSONRPCServer:
          except Exception, e:
             self._logger(1, "Can't compress response:", e)
          self._logger(4, 'COMPRESSION TIME:', round(getms()-mytime, 1))
-      return (200, outHeaders, dataOut)
+      return (200, outHeaders, dataOut, dataRaw)
 
    def serveForever(self, restartOn=False, sleep=10):
       """
@@ -2175,7 +2276,7 @@ class flaskJSONRPCServer:
          self._throw('Using Gevent not supported with selected Serv-backend "%s"'%_id)
       if not self.settings.gevent and not getattr(self.servBackend, '_supportNative', False):
          self._throw('Working without Gevent not supported with selected Serv-backend "%s"'%_id)
-      if any(self.settings.socket) and not getattr(self.servBackend, '_supportRawSocket', False):
+      if any(self.settings.socketPath) and not getattr(self.servBackend, '_supportRawSocket', False):
          self._throw('Serving on raw-socket not supported with selected Serv-backend "%s"'%_id)
       # run serving backend
       self.started=True
@@ -2186,6 +2287,9 @@ class flaskJSONRPCServer:
       self._server=[]
       wsgi=self.getWSGI()
       for i in xrange(len(self.settings.ip)):
+         # if passed only UDS path, create listener for it
+         if self.settings.socketPath[i] and not self.settings.socket[i]:
+            self.settings.socket[i]=self._initListenerUDS(self.settings.socketPath[i])
          # select bindAdress
          bindAdress=self.settings.socket[i] if self.settings.socket[i] else (self.settings.ip[i], self.settings.port[i])
          # wrapping WSGI for detecting adress

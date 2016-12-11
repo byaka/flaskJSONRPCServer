@@ -1,0 +1,1 @@
+ab -d -p .postData -T 'application/json' -s 60 -c 150 -n 100000 http://192.168.2.48:7001/api

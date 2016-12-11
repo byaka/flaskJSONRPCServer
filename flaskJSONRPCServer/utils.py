@@ -5,7 +5,7 @@ import httplib, sys, os, time, collections, random
 from virtVar import virtVar
 import gmultiprocessing
 
-__all__=['PY_V', 'magicDict', 'magicDictCold', 'dict2magic', 'gmultiprocessing', 'virtVar', 'deque2', 'UnixHTTPConnection', 'console', 'prepDataForLogger', 'getms', 'randomEx', 'randomEx_default_soLong']
+__all__=['PY_V', 'magicDict', 'magicDictCold', 'dict2magic', 'gmultiprocessing', 'rpcSender', 'virtVar', 'deque2', 'UnixHTTPConnection', 'console', 'prepDataForLogger', 'getms', 'randomEx', 'randomEx_default_soLong', 'strGet', 'getScriptName', 'getScriptPath', 'checkPath']
 __all__+=['jsonBackendWrapper', 'filelikeWrapper']
 __all__+=['isFunction', 'isInstance', 'isModule', 'isClass', 'isModuleBuiltin', 'isTuple', 'isArray', 'isDict', 'isString', 'isNum', 'isInt']
 
@@ -35,8 +35,8 @@ class UnixHTTPConnection(httplib.HTTPConnection):
    Thx to Erik van Zijst.
    https://bitbucket.org/evzijst/uhttplib/overview
    """
-   def __init__(self, path, host='localhost', port=None, strict=None, timeout=None, socketClass=None):
-      httplib.HTTPConnection.__init__(self, host, port=port, strict=strict, timeout=timeout)
+   def __init__(self, path, strict=None, timeout=None, socketClass=None):
+      httplib.HTTPConnection.__init__(self, 'localhost', strict=strict, timeout=timeout)
       self.path=path
       if socketClass: self.socketClass=socketClass
       else:
@@ -47,6 +47,199 @@ class UnixHTTPConnection(httplib.HTTPConnection):
       sock=self.socketClass.socket(self.socketClass.AF_UNIX, self.socketClass.SOCK_STREAM)
       sock.connect(self.path)
       self.sock=sock
+
+class rpcSender(object):
+
+   def __init__(self, server, constructRequest=None, parseResponse=None, compress=None, compressMinSize=300*1024, uncompress=None, uncompressHeader=None, updateHeaders=None, sendRequest=None, keepSocketClass=True, protocolDefault='http'):
+      self._server=server
+      self._constructRequest=constructRequest or self.__constructRequest_jsonrpc
+      self._parseResponse=parseResponse or self.__parseResponse_jsonrpc
+      self._compress=False if compress is False else (compress or self.__compressRequest_gzip)
+      self._uncompress=False if uncompress is False else (uncompress or self.__uncompressRequest_gzip)
+      self._uncompressHeader=False if uncompressHeader is False else (uncompressHeader or {'Accept-Encoding':'gzip'})
+      self._updateHeaders=updateHeaders
+      self._sendRequest=sendRequest or self.__sendRequest_rpcHttpPost
+      self.settings={
+         'compressMinSize':compressMinSize,
+         'connectionAttemptLimit':10,
+         'connectionAttemptSleepTime':1,
+         'addSpeedStats':True,
+         'protocolDefault':protocolDefault
+      }
+      self._sockClass=self._server._socketClass() if keepSocketClass else None
+
+   def __constructRequest_jsonrpc(self, stack):
+      oneRequest=True
+      waitResults={}
+      dataRaw=[]
+      if isinstance(stack, (tuple, list)) and len(stack):
+         if not isinstance(stack[0], (tuple, list)): stack=(stack, )
+         else: oneRequest=False
+         for i, s in enumerate(stack):
+            if len(s)==3 and s[2]:
+               dataRaw.append({'jsonrpc': '2.0', 'method': s[0], 'params':s[1]})
+            else:
+               rid=randomEx(vals=waitResults)
+               waitResults[rid]=i
+               dataRaw.append({'jsonrpc': '2.0', 'method': s[0], 'params':s[1], 'id':rid})
+         if oneRequest: dataRaw=dataRaw[0]
+      else:
+         self._server._throw('incorrect <stack> format for <rpcSender>')
+      try:
+         data=self._server._serializeJSON(dataRaw)
+      except Exception, e:
+         self._server._throw('<rpcSender> cant serialize JSON: %s'%(e))
+      return data, dataRaw, oneRequest, waitResults
+
+   def __parseResponse_jsonrpc(self, data):
+      try:
+         data=self._server._parseJSON(data)
+      except Exception, e:
+         self._server._throw('<rpcSender> cant parse JSON: %s'%(e))
+      return data
+
+   def __compressRequest_gzip(self, data, headers):
+      if sys.getsizeof(data)>=self.settings['compressMinSize']:
+         data=self._server._compressGZIP(data)
+         headers['Content-Encoding']='gzip'
+      return data
+
+   def __uncompressRequest_gzip(self, data, headers):
+      if headers.get('content-encoding', None)=='gzip':
+         try:
+            data=self._server._uncompressGZIP(data)
+         except Exception, e:
+            self._server._throw('<rpcSender> cant uncompress data: %s'%(e))
+      return data
+
+   def __selectProtocol_rpcHttp(self, p, api, sockClass):
+      if p=='uds':
+         return UnixHTTPConnection(api, socketClass=sockClass)
+      elif p=='http':
+         return httplib.HTTPConnection(api)
+      else:
+         self._server._throw('<rpcSender> dont know this protocol "%s"'%(p))
+
+   def __extractProtocol_rpcHttp(self, api):
+      p=self.settings['protocolDefault']
+      if '@' in api:
+         tArr=api.split('@', 1)
+         api=tArr[0]
+         if len(tArr)==2 and tArr[1]: p=tArr[1]
+      return p, api
+
+   def __sendRequest_rpcHttpPost(self, api, path, data, headers):
+      sockClass=self._sockClass or self._server._socketClass()
+      protocol, api=self.__extractProtocol_rpcHttp(api)
+      conn=None
+      err=None
+      i=0
+      while True:
+         if self.settings['connectionAttemptLimit'] and i>=self.settings['connectionAttemptLimit']:
+            self._server._throw('<rpcSender> cant connect to API "%s": %s'%(api, err))
+         try:
+            conn=self.__selectProtocol_rpcHttp(protocol, api, sockClass)
+            conn.request('POST', path, data, headers)
+            break
+         except Exception, e:
+            err=e
+            if self.settings['connectionAttemptSleepTime']:
+               self._server._sleep(self.settings['connectionAttemptSleepTime'])
+         i+=1
+      resp=conn.getresponse()
+      data=resp.read()
+      # construct headers
+      headersOut={}
+      for k, v in resp.getheaders():
+         k=k.lower()
+         if k in headersOut:
+            vOld=headersOut[k]
+            if isArray(vOld): vOld.append(v)
+            else: headersOut[k]=[vOld, v]
+         else: headersOut[k]=v
+      return data, headersOut
+
+   def __call__(self, api, path, stack):
+      mytime=getms()
+      # prepare request
+      data, dataRaw, oneRequest, waitResults=self._constructRequest(stack)
+      headers={}
+      if self._updateHeaders:
+         self._updateHeaders(headers)
+      if self._uncompressHeader:
+         headers.update(self._uncompressHeader)
+      if self._compress:
+         data=self._compress(data, headers)
+      # send request and recive response
+      data, headersOut=self._sendRequest(api, path, data, headers)
+      if not waitResults:
+         if self.settings['addSpeedStats']:
+            if oneRequest and dataRaw['method']!='speedStatsAdd':
+               self._server._speedStatsAdd('remote-'+dataRaw['method'], getms()-mytime)
+            #! пока неподдерживается запись статистики для мульти-запросов
+         return
+      # decoding
+      if self._uncompress:
+         data=self._uncompress(data, headersOut)
+      data=self._parseResponse(data)
+      # return results
+      if self.settings['addSpeedStats']:
+         if oneRequest and dataRaw['method']!='speedStatsAdd':
+            self._server._speedStatsAdd('remote-'+dataRaw['method'], getms()-mytime)
+         #! пока неподдерживается запись статистики для мульти-запросов
+      if oneRequest:
+         if 'error' in data:
+            self._server._throw('Error %s: %s'%(data['error']['code'], data['error']['message']))
+         else:
+            return data['result']
+      else:
+         results=range(len(waitResults))
+         for d in data:
+            if 'error' in d:
+               self._server._throw('Error %s: %s'%(d['error']['code'], d['error']['message']))
+            else:
+               results[waitResults[d['id']]]=d['result']
+         return results
+
+   def ex(self, api, path, stack, cb=None, cbData=None):
+      """
+      Расширенная обертка над обычным rpc вызовом.
+
+      Поддерживает мульти-запросы сразу на несколько серверов, вызывает их в отдельных потоках (гринлетах).
+      Если <cb> задан, он будет вызван для каждого запроса по завершении. Формат вызова (currentApi, result, error, <cbData>). Можно задать <cb> равным False, тогда он вызван не будет. Управление родительскому потоку передастся сразу, без ожидания завершения.
+      В противном случае произойдет ожидание выполнения всех запросов и их результаты вернутся в виде массива.
+      """
+      oneRequest=not isinstance(api, (tuple, list))
+      api=api if not oneRequest else (api,)
+      _callAsync=self._server.callAsync
+      _sleep=self._server._sleep
+      _sendRequest=self.__call__
+      if not cb and cb is not False:
+         # start all requests and get checkers
+         res=range(len(api))
+         checkerMap=[]
+         for i, apiOne in enumerate(api):
+            checkerMap.append((i, _callAsync(_sendRequest, args=(apiOne, path, stack), forceNative=False, returnChecker=True, wait=False)))
+         # now wait for completing
+         c=len(res)
+         while c>0:
+            for i, checker in checkerMap:
+               _sleep(0.01)
+               s, r, e=checker()
+               if not s: continue
+               if e: raise e
+               c-=1
+               res[i]=r
+         return res[0] if oneRequest else res
+      else:
+         # start all requests and pass cb
+         if cb:
+            def tFunc_cb(res, err, p):
+               p[0](p[1], res, err, p[2])
+         else:
+            tFunc_cb=None
+         for apiOne in api:
+            _callAsync(_sendRequest, args=(apiOne, path, stack), forceNative=False, wait=False, cb=tFunc_cb, cbData=(cb, apiOne, cbData))
 
 class jsonBackendWrapper(object):
    """
@@ -137,8 +330,8 @@ consoleColor=magicDict({
    'ok':'\033[92m',
    'warning':'\033[93m',
    'fail':'\033[91m',
-   'end':'\033[0m',
    'bold':'\033[1m',
+   'end':'\033[0m',
    'underline':'\033[4m',
    'clearLast':'\033[F\033[K'
 })
@@ -224,6 +417,66 @@ def randomEx(mult=None, vals=None, pref='', suf='', soLong=0.1, cbSoLong=None):
          return None
    return s
 
+def strGet(text, pref='', suf='', index=0, default=None):
+   """
+   This method find prefix, then find suffix and return data between them.
+   If prefix is empty, prefix is beginnig of input data.
+   If suffix is empty, suffix is ending of input data.
+
+   :param str text: Input data.
+   :param str pref: Prefix.
+   :param str suf: Suffix.
+   :param int index: Position for finding.
+   :param any default: Return this if nothing finded.
+   :return str:
+   """
+   if(text==''): return ''
+   text1=text.lower()
+   pref=pref.lower()
+   suf=suf.lower()
+   if pref!='': i1=text1.find(pref,index)
+   else: i1=index
+   if i1==-1: return default
+   if suf!='': i2=text1.find(suf,i1+len(pref))
+   else: i2=len(text1)
+   if i2==-1: return default
+   return text[i1+len(pref):i2]
+
+def getScriptPath(full=False, real=True):
+   """
+   This method return path of current script. If <full> is False return only path, else return path and file name.
+
+   :param bool full:
+   :return str:
+   """
+   if full:
+      return os.path.realpath(sys.argv[0]) if real else sys.argv[0]
+   else:
+      return os.path.dirname(os.path.realpath(sys.argv[0]) if real else sys.argv[0])
+
+def getScriptName(withExt=False):
+   """
+   This method return name of current script. If <withExt> is True return name with extention.
+
+   :param bool withExt:
+   :return str:
+   """
+   if withExt:
+      return os.path.basename(sys.argv[0])
+   else:
+      return os.path.splitext(os.path.basename(sys.argv[0]))[0]
+
+def checkPath(s):
+   """
+   This method try to validate given path in filesystem.
+   """
+   #! need more complicated realisation, see http://stackoverflow.com/a/34102855
+   try:
+      f=open(s, 'w')
+      f.close()
+      return True
+   except Exception, e:
+      return False
 #========================================
 import decimal
 from types import InstanceType, ModuleType, ClassType, TypeType
@@ -261,24 +514,24 @@ if __name__=='__main__':
 
    d._magicDictCold__freeze()
    try: d['test22']=22
-   except RuntimeError: print 'Forzen!'
+   except RuntimeError: print 'Frozen!'
    try: d.test11=11
-   except RuntimeError: print 'Forzen!'
+   except RuntimeError: print 'Frozen!'
    try: del d['test2']
-   except RuntimeError: print 'Forzen!'
+   except RuntimeError: print 'Frozen!'
    try: del d.test1
-   except RuntimeError: print 'Forzen!'
+   except RuntimeError: print 'Frozen!'
    print '~', d.keys(), d.test1, d.test2, d['test1'], d['test2']
 
    d._magicDictCold__unfreeze()
    try: d['test22']=22
-   except RuntimeError: print 'Forzen!'
+   except RuntimeError: print 'Frozen!'
    try: d.test11=11
-   except RuntimeError: print 'Forzen!'
+   except RuntimeError: print 'Frozen!'
    try: del d['test2']
-   except RuntimeError: print 'Forzen!'
+   except RuntimeError: print 'Frozen!'
    try: del d.test1
-   except RuntimeError: print 'Forzen!'
+   except RuntimeError: print 'Frozen!'
    print '~', d.keys(), d.test11, d.test22, d['test11'], d['test22']
    sys.exit(0)
 

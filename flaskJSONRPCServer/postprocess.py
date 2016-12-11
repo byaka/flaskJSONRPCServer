@@ -14,7 +14,7 @@ class postprocess(object):
    :param dict postprocessMap: Map of postprocess wsgi by conditions.
    """
 
-   _mode='rewrite'
+   _modeDefault='rewrite'
    _modeSupported=('rewrite', 'fake')
    _typeSupported=('wsgi', 'cb')
 
@@ -27,24 +27,34 @@ class postprocess(object):
       self.__status=0
       self.__headers=[]
       self.__data=[]
+      self.__dataRaw=None
       self.__mode=None
       self.__type=None
 
-   def __call__(self, request, status, headers, data):
+   def __call__(self, request, status, headers, data, dataRaw):
       """
-      Select and run postprocess WSGIs for passed request.
+      Select and run postprocessers for passed request.
       """
-      print '>>> routing', status, data
       # routing
-      if self._postprocessMap_byStatus and status in self._postprocessMap_byStatus:
-         cbArr=self._postprocessMap_byStatus[status]
-      else:
+      cbArr=None
+      if self._postprocessMap_byStatus:
+         cbArr=[]
+         # http-status
+         if status in self._postprocessMap_byStatus:
+            cbArr+=self._postprocessMap_byStatus[status]
+         # rpc-error
+         if dataRaw and dataRaw['rpcError']:
+            for s in dataRaw['rpcError']:
+               if s in self._postprocessMap_byStatus:
+                  cbArr+=self._postprocessMap_byStatus[s]
+      if not cbArr:  #without postprocessers
          return status, headers, data
       self.__request=request
       # store current response-values
       self.__status=status
       self.__headers=headers
       self.__data=data
+      self.__dataRaw=dataRaw
       # prepare environ
       self._prepare()
       # start processing
@@ -52,7 +62,7 @@ class postprocess(object):
          # erase locals
          self.__isEnd=False
          self.__isSkipSaving=False
-         self.__mode=mode or self._mode
+         self.__mode=mode or self._modeDefault
          self.__type=type
          self.__postData_pos=0
          # process one cb
@@ -109,22 +119,22 @@ class postprocess(object):
 
    def _process(self, cb):
       if self.__type=='wsgi':
-         # callback is WSGI app
+         # cb is WSGI app
          data=[self.__data] if isString(self.__data) else self.__data
          status=self._server._toHttpStatus(self.__status) if not isString(self.__status) else self.__status
          env=self.__request['environ']
          env['flaskJSONRPCServer']=self._server
          env['flaskJSONRPCServer_end']=self._end
          env['flaskJSONRPCServer_skip']=self._skip
-         env['flaskJSONRPCServer_lastResponse']=(status, self.__headers, data)
+         env['flaskJSONRPCServer_lastResponse']=(status, self.__headers, data, self.__dataRaw)
          res=cb(env, self._wsgi_start_response)
          if self.__isSkipSaving or self.__mode=='fake': return
          elif self.__mode=='rewrite':
             self.__data=res
       elif self.__type=='cb':
-         # callback is simple cb
+         # cb is simple callback
          status=self._server._fromHttpStatus(self.__status) if isString(self.__status) else self.__status
-         controller=controllerWrapper(self._end, self._skip, (status, self.__headers, self.__data))
+         controller=controllerWrapper(self._end, self._skip, (status, self.__headers, self.__data, self.__dataRaw))
          res=cb(self.__request, self._server, controller)
          if self.__isSkipSaving or self.__mode=='fake': return
          elif self.__mode=='rewrite':
