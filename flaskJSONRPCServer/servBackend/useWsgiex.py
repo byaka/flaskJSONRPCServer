@@ -64,7 +64,7 @@ class servBackend:
       if not hasattr(server, '_serverThread'): server._serverThread=[]
       if not isTuple(bindAdress) and not isArray(bindAdress): backlog=None
       else: backlog=server.setts.backlog
-      s=self.create(bindAdress, wsgiApp, log=server.setts.debug, threaded=True, useGevent=server.setts.gevent, sslArgs=server.setts.ssl, backlog=backlog)
+      s=self.create(bindAdress, wsgiApp, log=server._logger, threaded=True, useGevent=server.setts.gevent, sslArgs=server.setts.ssl, backlog=backlog)
       server._server.append(s)
       if andRun:
          sThread=server._thread(s.serve_forever)

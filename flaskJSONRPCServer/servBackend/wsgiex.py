@@ -29,7 +29,7 @@ It doesn't has any dependences and use some parts of Werkzeug's and pyWSGI's sou
    limitations under the License.
 """
 
-import sys, os, socket, threading, random, time, fcntl, urllib, traceback
+import sys, os, socket, threading, random, time, fcntl, urllib, traceback, inspect
 from fhhp import httpInputWrapper, LongRequestError
 
 sys_version="Python/"+sys.version.split()[0]
@@ -252,7 +252,7 @@ class StreamServerEx(object):
    def logger(self, level, *args):
       l=self._log
       if not l: return
-      elif l is True or (l is not False and isinstance(l, int)):
+      elif l is True or isinstance(l, int):
          if l is not True and level>l: return
          _write=sys.stdout.write
          for i, s in enumerate(args):
@@ -493,8 +493,8 @@ class WSGIRequestHandlerEx:
          except Exception, e:
             if not self.headers_sent: del self.headers_set[:]
             self.close_connection=1
+            self.log_error('Error on serving request as WSGI: '+getErrorInfo())
             self.send_error(500)
-            self.log_error('Error on serving request as WSGI: '+e)
          #PEP3333 demand this
          if data_iter and hasattr(data_iter, 'close'): data_iter.close()
 
@@ -708,7 +708,7 @@ class WSGIRequestHandlerEx:
 
    def log_request(self, code):
       s='<%s> %s "%s"'%(self.client_address[0], self.requestline, code)
-      self.server.logger(3, s)
+      self.server.logger(4, s)
 
    httpResponseMap={
       100: ('Continue', 'Request received, please continue'),
@@ -756,6 +756,21 @@ class WSGIRequestHandlerEx:
       504: ('Gateway Timeout', 'The gateway server did not receive a timely response'),
       505: ('HTTP Version Not Supported', 'Cannot fulfill request.'),
    }
+
+def getErrorInfo():
+   """
+   This method return info about last exception.
+
+   :return str:
+   """
+   tArr=inspect.trace()[-1]
+   fileName=tArr[1]
+   lineNo=tArr[2]
+   exc_obj=sys.exc_info()[1]
+   s='%s:%s > %s'%(fileName, lineNo, exc_obj)
+   sys.exc_clear()
+   return s
+
 
 def date_time_string(timestamp=None):
    """ Return the current date and time formatted for a message header. """

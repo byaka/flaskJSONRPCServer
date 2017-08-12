@@ -5,9 +5,9 @@ import httplib, sys, os, time, collections, random
 from virtVar import virtVar
 import gmultiprocessing
 
-__all__=['PY_V', 'magicDict', 'magicDictCold', 'dict2magic', 'gmultiprocessing', 'rpcSender', 'virtVar', 'deque2', 'UnixHTTPConnection', 'console', 'prepDataForLogger', 'getms', 'randomEx', 'randomEx_default_soLong', 'strGet', 'getScriptName', 'getScriptPath', 'checkPath']
+__all__=['PY_V', 'magicDict', 'magicDictCold', 'MagicDict', 'MagicDictCold', 'dict2magic', 'gmultiprocessing', 'rpcSender', 'virtVar', 'deque2', 'UnixHTTPConnection', 'console', 'prepDataForLogger', 'getms', 'randomEx', 'randomEx_default_soLong', 'strGet', 'getScriptName', 'getScriptPath', 'checkPath']
 __all__+=['jsonBackendWrapper', 'filelikeWrapper']
-__all__+=['isFunction', 'isInstance', 'isModule', 'isClass', 'isModuleBuiltin', 'isTuple', 'isArray', 'isDict', 'isString', 'isNum', 'isInt']
+__all__+=['isGen', 'isGenerator', 'isFunc', 'isFunction', 'isIter', 'isIterable', 'isClass', 'isInstance', 'isModule', 'isModuleBuiltin', 'isString', 'isStr', 'isBool', 'isNum', 'isFloat', 'isInt', 'isArray', 'isList', 'isTuple', 'isDict', 'isObject', 'isSet']
 
 global PY_V
 PY_V=float(sys.version[:3])
@@ -270,7 +270,7 @@ class filelikeWrapper(object):
    def readline(self):
       return self.read()
 
-class magicDict(dict):
+class MagicDict(dict):
    """
    Get and set values like in Javascript (dict.<key>).
    """
@@ -282,14 +282,15 @@ class magicDict(dict):
    __setattr__=dict.__setitem__
    __delattr__=dict.__delitem__
    __reduce__=dict.__reduce__
+magicDict=MagicDict
 
-class magicDictCold(magicDict):
+class MagicDictCold(MagicDict):
    """
-   Extended magicDict, that allow freezing.
+   Extended MagicDict, that allow freezing.
    """
    def __getattr__(self, k):
       if k=='__frozen': return object.__getattribute__(self, '__frozen')
-      return magicDict.__getattr__(self, k)
+      return MagicDict.__getattr__(self, k)
 
    def __freeze(self):
       object.__setattr__(self, '__frozen', True)
@@ -299,28 +300,29 @@ class magicDictCold(magicDict):
 
    def __setattr__(self, k, v):
       if getattr(self, '__frozen', None): raise RuntimeError('Frozen')
-      magicDict.__setattr__(self, k, v)
+      MagicDict.__setattr__(self, k, v)
 
    def __setitem__(self, k, v):
       if getattr(self, '__frozen', None): raise RuntimeError('Frozen')
-      magicDict.__setitem__(self, k, v)
+      MagicDict.__setitem__(self, k, v)
 
    def __delattr__(self, k):
       if getattr(self, '__frozen', None): raise RuntimeError('Frozen')
-      magicDict.__delattr__(self, k)
+      MagicDict.__delattr__(self, k)
 
    def __delitem__(self, k):
       if getattr(self, '__frozen', None): raise RuntimeError('Frozen')
-      magicDict.__delitem__(self, k)
+      MagicDict.__delitem__(self, k)
+magicDictCold=MagicDictCold
 
 def dict2magic(o, recursive=False):
    if recursive:
-      if isArray(o):
-         for i, _ in enumerate(o): o[i]=dict2magic(o[i], recursive=True)
-      elif isDict(o):
-         for i in o: o[i]=dict2magic(o[i], recursive=True)
-         o=magicDict(o)
-   elif isDict(o): o=magicDict(o)
+      if isArray(o) or isDict(o) or isSet(o) or isTuple(o):
+         for i in (o if isDict(o) else xrange(len(o))):
+            o[i]=dict2magic(o[i], recursive=True)
+         if isDict(o): o=MagicDict(o)
+   elif isDict(o):
+      o=MagicDict(o)
    return o
 
 consoleColor=magicDict({
@@ -405,9 +407,12 @@ def randomEx(mult=None, vals=None, pref='', suf='', soLong=0.1, cbSoLong=None):
    if cbSoLong is None:
       cbSoLong=randomEx_default_soLong
    vals=vals or tuple()
-   s=pref+str(int(random.random()*mult))+suf
-   while(s in vals):
-      s=pref+str(int(random.random()*mult))+suf
+   s=None
+   toStr=isString(pref) and isString(suf)
+   while not s or s in vals:
+      s=int(random.random()*mult)
+      if toStr:
+         s=pref+str(s)+suf
       # defence frome freeze
       if (getms()-mytime)/1000.0>soLong:
          mytime=getms()
@@ -442,29 +447,31 @@ def strGet(text, pref='', suf='', index=0, default=None):
    if i2==-1: return default
    return text[i1+len(pref):i2]
 
-def getScriptPath(full=False, real=True):
+def getScriptPath(full=False, real=True, f=None):
    """
    This method return path of current script. If <full> is False return only path, else return path and file name.
 
    :param bool full:
    :return str:
    """
+   f=f or sys.argv[0]
    if full:
-      return os.path.realpath(sys.argv[0]) if real else sys.argv[0]
+      return os.path.realpath(f) if real else f
    else:
-      return os.path.dirname(os.path.realpath(sys.argv[0]) if real else sys.argv[0])
+      return os.path.dirname(os.path.realpath(f) if real else f)
 
-def getScriptName(withExt=False):
+def getScriptName(withExt=False, f=None):
    """
    This method return name of current script. If <withExt> is True return name with extention.
 
    :param bool withExt:
    :return str:
    """
+   f=f or sys.argv[0]
    if withExt:
-      return os.path.basename(sys.argv[0])
+      return os.path.basename(f)
    else:
-      return os.path.splitext(os.path.basename(sys.argv[0]))[0]
+      return os.path.splitext(os.path.basename(f))[0]
 
 def checkPath(s):
    """
@@ -478,32 +485,62 @@ def checkPath(s):
    except Exception, e:
       return False
 #========================================
-import decimal
-from types import InstanceType, ModuleType, ClassType, TypeType
+import decimal, types, collections
 
-def isFunction(o): return hasattr(o, '__call__')
+def isGenerator(var):
+   return isinstance(var, (types.GeneratorType))
+isGen=isGenerator
 
-def isInstance(o): return isinstance(o, (InstanceType))
+def isFunction(var):
+   return hasattr(var, '__call__')
+isFunc=isFunction
 
-def isClass(o): return isinstance(o, (type, ClassType, TypeType))
+def isIterable(var):
+   return isinstance(var, collections.Iterable)
+isIter=isIterable
 
-def isModule(o): return isinstance(o, (ModuleType))
+def isClass(var):
+   return isinstance(var, (type, types.ClassType, types.TypeType))
 
-def isModuleBuiltin(o): return isModule(o) and getattr(o, '__name__', '') in sys.builtin_module_names
+def isInstance(var):
+   #! work only with old-styled classes
+   return isinstance(var, (types.InstanceType))
 
-def isTuple(o): return isinstance(o, (tuple))
+def isModule(var):
+   return isinstance(var, (types.ModuleType))
 
-def isArray(o): return isinstance(o, (list))
+def isModuleBuiltin(var):
+   return isModule(var) and getattr(var, '__name__', '') in sys.builtin_module_names
 
-def isDict(o): return isinstance(o, (dict))
+def isString(var):
+   return isinstance(var, (str, unicode))
+isStr=isString
 
-def isString(o): return isinstance(o, (str, unicode))
+def isBool(var):
+   return isinstance(var, (bool))
 
 def isNum(var):
    return (var is not True) and (var is not False) and isinstance(var, (int, float, long, complex, decimal.Decimal))
 
+def isFloat(var):
+   return isinstance(var, (float, decimal.Decimal))
+
 def isInt(var):
    return (var is not True) and (var is not False) and isinstance(var, int)
+
+def isList(var):
+   return isinstance(var, (list))
+isArray=isList
+
+def isTuple(var):
+   return isinstance(var, (tuple))
+
+def isDict(var):
+   return isinstance(var, (dict))
+isObject=isDict
+
+def isSet(var):
+   return isinstance(var, (set))
 #========================================
 
 if __name__=='__main__':

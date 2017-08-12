@@ -57,7 +57,7 @@ class flaskJSONRPCServer:
    """
    Main class of server.
 
-   :param list ipAndPort: List or sequence, containing IP and PORT or SOCKET_PATH and SOCKET.
+   :param list|str|None ipAndPort: List or sequence, containing IP and PORT(or SOCKET_PATH and SOCKET), or str witp path to UDS socket or None for fake server.
    :param bool multipleAdress: If True, <ipAndPort> must be list, containing different <ipAndPort>. All of them will be binded to this server.
    :param bool blocking: Switch server to blocking mode (only one request per time will be processed).
    :param bool|dict cors: Add CORS headers to output (Access-Control-Allow-*). If 'dict', can contain values for <origin> and <method>.
@@ -119,7 +119,7 @@ class flaskJSONRPCServer:
          'auth':auth,
          'experimental':experimental,
          'controlGC':controlGC,
-         'controlGC_everySeconds':3*60,  # every 30 minutes
+         'controlGC_everySeconds':5*60,  # every 30 minutes
          'controlGC_everyRequestCount':150*1000,  # every 150k requests
          'controlGC_everyDispatcherCount':150*1000,  # every 150k dispatcher's calls
          'backlog':10*1000,
@@ -140,8 +140,8 @@ class flaskJSONRPCServer:
          for bind in bindAdress:
             tArr={'ip':None, 'port':None, 'socketPath':None, 'socket':None}
             if isString(bind):
-               if not checkPath(bind):
-                  self._throw('Wrong path for UDS socket: %s'%bind)
+               # if not checkPath(bind):
+               #    self._throw('Wrong path for UDS socket: %s'%bind)
                tArr['socketPath']=bind
             else:
                if len(bind)!=2:
@@ -392,6 +392,8 @@ class flaskJSONRPCServer:
          self._logger(2, 'WARNING: tweaking file descriptors limit not supported on your platform')
          return None
       if descriptors:
+         if descriptors is True:
+            descriptors=(65536, 65536)
          try:  #for Linux
             if resource.getrlimit(resource.RLIMIT_NOFILE)!=descriptors:
                resource.setrlimit(resource.RLIMIT_NOFILE, descriptors)
@@ -895,8 +897,8 @@ class flaskJSONRPCServer:
       """
       if self._inChild():
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
-      if not isInstance(dispatcher):
-         self._throw('Bad dispatcher type: %s'%type(dispatcher))
+      # if not isInstance(dispatcher):
+      #    self._throw('Bad dispatcher type: %s'%type(dispatcher))
       includePrivate=includePrivate or tuple()
       fallback=self.__settings['fallback_JSONP'] if fallback is None else fallback
       path=self._formatPath(path)
@@ -1034,11 +1036,13 @@ class flaskJSONRPCServer:
       if 'id' in data:
          _id=data['id']
          del data['id']
-      else: _id=None
+      else:
+         _id=None
       if isError:
          s={"jsonrpc": "2.0", "error": data, "id": _id}
-      elif id:
+      elif _id:
          s={"jsonrpc": "2.0", "result": data['data'], "id": _id}
+      else: s=None
       return s
 
    def _fixJSON(self, o):
@@ -1560,13 +1564,15 @@ class flaskJSONRPCServer:
       self._gcStats['processing']=True
       mytime=getms()
       m1=self._countMemory()
-      s=gc.collect()
-      s+=gc.collect()
-      s+=gc.collect()
-      s+=gc.collect()
+      thr=gc.get_threshold()
+      l=gc.get_count()
+      c=0
+      for i in xrange(3):
+         if l[i]<thr[i]: break
+         c+=gc.collect(i)
       m2=self._countMemory()
-      if s and m1 and m2:
-         self._logger(3, 'GC executed manually: collected %s objects, memore freed %smb, used %smb, peak %smb'%(s, round((m1['now']-m2['now'])/1024.0, 1), round(m2['now']/1024.0, 1), round(m2['peak']/1024.0, 1)))
+      if c and m1 and m2:
+         self._logger(3, 'GC executed manually: collected %s objects, memore freed %smb, used %smb, peak %smb'%(c, round((m1['now']-m2['now'])/1024.0, 1), round(m2['now']/1024.0, 1), round(m2['peak']/1024.0, 1)))
       self._speedStatsAdd('controlGC', getms()-mytime)
       self._gcStats['lastTime']=getms(False)
       self._gcStats['processedRequestCount']=0
@@ -1585,7 +1591,7 @@ class flaskJSONRPCServer:
       headers.append(('Content-Encoding', 'gzip'))
       headers.append(('Vary', 'Accept-Encoding'))
       # headers.append(('Content-Length', len(data))) # serv-backend set it automatically
-      return (data, headers)
+      return (headers, data)
 
    def _compressGZIP(self, data):
       """
@@ -1783,8 +1789,6 @@ class flaskJSONRPCServer:
          'remote_addr':'localhost',
          'method':'POST',
          'url':'localhost'+path,
-         'data':None,
-         'dataPrint':None,
          'args':{},
          'servedBy':(None, None, None),
          'ip':'localhost',
@@ -1965,7 +1969,7 @@ class flaskJSONRPCServer:
                # try to process request
                if not dataIn['jsonrpc'] or not dataIn['method'] or (dataIn['params'] and not(isDict(dataIn['params'])) and not(isArray(dataIn['params']))):  #syntax error in request
                   error.append({"code": -32600, "message": "Invalid Request"})
-               elif dataIn['method'] not in self.routes[request_path]:  #call of uncknown method
+               elif dataIn['method'] not in self.routes[request_path]:  #call of unknown method
                   error.append({"code": -32601, "message": "Method not found", "id":dataIn['id']})
                else:  #process correct request
                   # generate unique id
@@ -2252,7 +2256,7 @@ class flaskJSONRPCServer:
          self._throw('This method "%s()" can be called only from <main> process'%sys._getframe().f_code.co_name)
       # freeze settings
       self.__settings=dict(self.settings)
-      self.settings._magicDictCold__freeze()
+      self.settings._MagicDictCold__freeze()
       # start execBackends
       self._startExecBackends()
       if self.settings.allowCompress and not(self.settings.experimental and experimentalPack.use_moreAsync and '_compressGZIP' in experimentalPack.moreAsync_methods):
