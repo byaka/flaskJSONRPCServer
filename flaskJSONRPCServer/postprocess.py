@@ -24,6 +24,12 @@ class postprocess(object):
       self.__request={}
       self.__isEnd=False
       self.__isSkipSaving=False
+
+      self.__status_original=0
+      self.__headers_original=[]
+      self.__data_original=[]
+      self.__dataRaw_original=None
+
       self.__status=0
       self.__headers=[]
       self.__data=[]
@@ -51,10 +57,10 @@ class postprocess(object):
          return status, headers, data
       self.__request=request
       # store current response-values
-      self.__status=status
-      self.__headers=headers
-      self.__data=data
-      self.__dataRaw=dataRaw
+      self.__status_original=self.__status=status
+      self.__headers_original=self.__headers=headers
+      self.__data_original=self.__data=data
+      self.__dataRaw_original=self.__dataRaw=dataRaw
       # prepare environ
       self._prepare()
       # start processing
@@ -120,24 +126,34 @@ class postprocess(object):
    def _process(self, cb):
       if self.__type=='wsgi':
          # cb is WSGI app
-         data=[self.__data] if isString(self.__data) else self.__data
-         status=self._server._toHttpStatus(self.__status) if not isString(self.__status) else self.__status
          env=self.__request['environ']
          env['flaskJSONRPCServer']=self._server
          env['flaskJSONRPCServer_end']=self._end
          env['flaskJSONRPCServer_skip']=self._skip
-         env['flaskJSONRPCServer_lastResponse']=(status, self.__headers, data, self.__dataRaw)
+         env['flaskJSONRPCServer_lastResponse']=(
+            self._server._toHttpStatus(self.__status) if not isString(self.__status) else self.__status,
+            [self.__data] if isString(self.__data) else self.__data,
+            self.__headers, self.__dataRaw
+         )
+         env['flaskJSONRPCServer_originalResponse']=(
+            self._server._toHttpStatus(self.__status_original) if not isString(self.__status_original) else self.__status_original,
+            [self.__data_original] if isString(self.__data_original) else self.__data_original,
+            self.__headers_original, self.__dataRaw_original
+         )
          res=cb(env, self._wsgi_start_response)
          if self.__isSkipSaving or self.__mode=='fake': return
          elif self.__mode=='rewrite':
             self.__data=res
       elif self.__type=='cb':
          # cb is simple callback
-         status=self._server._fromHttpStatus(self.__status) if isString(self.__status) else self.__status
-         controller=controllerWrapper(self._end, self._skip, (status, self.__headers, self.__data, self.__dataRaw))
+         controller=controllerWrapper(
+            self._end, self._skip,
+            (self._server._fromHttpStatus(self.__status) if isString(self.__status) else self.__status, self.__headers, self.__data, self.__dataRaw),
+            (self._server._fromHttpStatus(self.__status_original) if isString(self.__status_original) else self.__status_original, self.__headers_original, self.__data_original, self.__dataRaw_original),
+         )
          res=cb(self.__request, self._server, controller)
          if self.__isSkipSaving or self.__mode=='fake': return
-         elif self.__mode=='rewrite':
+         elif self.__mode=='rewrite' and res:
             self.__status=res[0]
             self.__data=res[1]
             self.__headers=res[2] if len(res)>2 else []
@@ -155,9 +171,10 @@ class controllerWrapper(object):
    """
    if PY_V<2.7:
       # by some unknown reason, in python>2.6 slots slightly slower
-      __slots__=('end', 'skip', 'lastResponse')
+      __slots__=('end', 'skip', 'lastResponse', 'originalResponse')
 
-   def __init__(self, end, skip, lastResponse):
+   def __init__(self, end, skip, lastResponse, originalResponse):
       self.end=end
       self.skip=skip
       self.lastResponse=lastResponse
+      self.originalResponse=originalResponse

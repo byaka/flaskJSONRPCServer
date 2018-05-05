@@ -292,7 +292,7 @@ class execBackend:
       self._allowCompress=self.settings['allowCompress']
       if self._allowCompress is None and self._server.settings.experimental and experimentalPack.use_moreAsync and '_compressGZIP' in experimentalPack.moreAsync_methods: self._allowCompress=True
       # patching or un-patching (main program can patch themselve before execBackend will be started. in this case patched version of libs fall in child process)
-      self._server._importAll(forceDelete=True, scope=globals())
+      self._server._importAll(forceDelete=True)
       # prepare connection for sendRequest
       if self.settings['allowThreads']:
          # in threaded mode (also gevent) we can't use same socket for concurrent connections
@@ -351,7 +351,7 @@ class execBackend:
       if self._lazyRequestLastTime is not True and getms()-self._lazyRequestLastTime<self.settings['sleepTime_lazyRequest']: return
       for rId, v in self._lazyRequest.iteritems():
          if not len(v): continue
-         path=self._server._strGet(rId, '', '<')
+         path=strGet(rId, '', '<')
          self._lazyRequest[rId]=v[self.settings['lazyRequestChunk']:]
          self.sendRequest(path, v[:self.settings['lazyRequestChunk']])
          if len(v)>self.settings['lazyRequestChunk']:
@@ -417,8 +417,9 @@ class execBackend:
 
    def childDisableNotImplemented(self):
       # disable none-implemented methods in parentServer for preventing call them from dispatcher
-      whiteList=['_callDispatcher', '_checkFileDescriptor', '_compressResponse', '_copyRequestContext', '_countFileDescriptor', '_fixJSON', '_formatPath', '_getErrorInfo', '_inChild', '_parseRequest', '_prepResponse', '_strGet', '_tweakLimit', 'fixJSON', '_countMemory', '_calcMimeType', '_calcHttpStatus', '_copyRequestContext', '_prepRequestContext', '_loadPostData']
+      whiteList=['_callDispatcher', '_checkFileDescriptor', '_compressResponse', '_copyRequestContext', '_countFileDescriptor', '_fixJSON', '_inChild', '_parseRequest', '_prepResponse', '_tweakLimit', 'fixJSON', '_countMemory', '_copyRequestContext', '_prepRequestContext', '_loadPostData']
       for name in dir(self._parentServer):
+         if name.startswith('__') and name.endswith('__'): continue
          if not isFunction(getattr(self._parentServer, name)): continue
          if name not in whiteList:
             # closure for accessing correct name

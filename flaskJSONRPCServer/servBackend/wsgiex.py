@@ -771,7 +771,6 @@ def getErrorInfo():
    sys.exc_clear()
    return s
 
-
 def date_time_string(timestamp=None):
    """ Return the current date and time formatted for a message header. """
    if timestamp is None:

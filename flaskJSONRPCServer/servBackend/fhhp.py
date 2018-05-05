@@ -111,7 +111,7 @@ def fhhp_fromFile(data, ignoreBadLine=False, useUpper=False, storeOriginalName=T
 # default size-settings for parts of http-request
 HEAD_SIZE_CHUNK=1024
 HEAD_SIZE_MAX=10*1024
-BODY_SIZE_CHUNK=1*1024*1024
+BODY_SIZE_CHUNK=30*1024
 BODY_SIZE_MAX=30*1024*1024
 
 class LongRequestError(Exception):

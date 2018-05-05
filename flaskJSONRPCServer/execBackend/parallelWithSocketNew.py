@@ -243,7 +243,7 @@ class execBackend:
       self._useGevent=not(self.settings['disableGeventInChild']) and self._parentServer.settings.gevent
       self._server=flaskJSONRPCServer(self._server_initListener(), blocking=self.settings['blocking'], cors=False, gevent=self._useGevent, debug=False, log=self._parentServer.settings.log, fallback=False, allowCompress=self._allowCompress, compressMinSize=self.settings['compressMinSize'], jsonBackend=self._jsonBackend, tweakDescriptors=None, notifBackend='threaded', dispatcherBackend='simple', experimental=self._parentServer.settings.experimental, controlGC=self._parentServer.settings.controlGC, name='API_of_<%s>'%self._id)
       # patching or un-patching (main program can patch themselve before execBackend will be started. in this case patched version of libs fall in child process)
-      self._server._importAll(forceDelete=True, scope=globals())
+      self._server._importAll(forceDelete=True)
       # create hashmap for parentGlobals
       self.parentGlobals_oldHash={}
       if self.settings['importGlobalsFromParent']:
@@ -274,8 +274,9 @@ class execBackend:
    def _parentServer_disableNotImplemented(self):
       """ Disable none-implemented methods in parentServer for preventing call them from dispatcher. """
       # important, it's white-list, so all other method will be re-defined to NotImplemented
-      whiteList=('_callDispatcher', '_checkFileDescriptor', '_compressResponse', '_copyRequestContext', '_countFileDescriptor', '_fixJSON', '_formatPath', '_getErrorInfo', '_inChild', '_parseRequest', '_prepResponse', '_strGet', '_tweakLimit', 'fixJSON', '_countMemory', '_calcMimeType', '_calcHttpStatus', '_copyRequestContext', '_prepRequestContext', '_loadPostData', 'lock', 'unlock', 'wait', '_speedStatsAdd', 'stats')
+      whiteList=('_callDispatcher', '_checkFileDescriptor', '_compressResponse', '_copyRequestContext', '_countFileDescriptor', '_fixJSON', '_inChild', '_parseRequest', '_prepResponse', '_tweakLimit', 'fixJSON', '_countMemory', '_copyRequestContext', '_prepRequestContext', '_loadPostData', 'lock', 'unlock', 'wait', '_speedStatsAdd', 'stats')
       for name in dir(self._parentServer):
+         if name.startswith('__') and name.endswith('__'): continue
          link=getattr(self._parentServer, name)
          if not isFunction(link): continue
          if name not in whiteList:

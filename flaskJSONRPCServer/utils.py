@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import httplib, sys, os, time, collections, random
+import httplib, sys, os, time, collections, random, inspect, traceback
 from virtVar import virtVar
 import gmultiprocessing
 
-__all__=['PY_V', 'magicDict', 'magicDictCold', 'MagicDict', 'MagicDictCold', 'dict2magic', 'gmultiprocessing', 'rpcSender', 'virtVar', 'deque2', 'UnixHTTPConnection', 'console', 'prepDataForLogger', 'getms', 'randomEx', 'randomEx_default_soLong', 'strGet', 'getScriptName', 'getScriptPath', 'checkPath']
+__all__=['PY_V', 'magicDict', 'magicDictCold', 'MagicDict', 'MagicDictCold', 'dict2magic', 'gmultiprocessing', 'rpcSender', 'virtVar', 'deque2', 'UnixHTTPConnection', 'console', 'prepDataForLogger', 'getms', 'randomEx', 'randomEx_default_soLong', 'strGet', 'getScriptName', 'getScriptPath', 'checkPath', 'getErrorInfo', 'formatPath', 'calcMimeType']
 __all__+=['jsonBackendWrapper', 'filelikeWrapper']
 __all__+=['isGen', 'isGenerator', 'isFunc', 'isFunction', 'isIter', 'isIterable', 'isClass', 'isInstance', 'isModule', 'isModuleBuiltin', 'isString', 'isStr', 'isBool', 'isNum', 'isFloat', 'isInt', 'isArray', 'isList', 'isTuple', 'isDict', 'isObject', 'isSet']
 
@@ -50,7 +50,7 @@ class UnixHTTPConnection(httplib.HTTPConnection):
 
 class rpcSender(object):
 
-   def __init__(self, server, constructRequest=None, parseResponse=None, compress=None, compressMinSize=300*1024, uncompress=None, uncompressHeader=None, updateHeaders=None, sendRequest=None, keepSocketClass=True, protocolDefault='http'):
+   def __init__(self, server, constructRequest=None, parseResponse=None, compress=None, compressMinSize=300*1024, uncompress=None, uncompressHeader=None, updateHeaders=None, sendRequest=None, keepSocketClass=True, protocolDefault='tcp'):
       self._server=server
       self._constructRequest=constructRequest or self.__constructRequest_jsonrpc
       self._parseResponse=parseResponse or self.__parseResponse_jsonrpc
@@ -64,9 +64,19 @@ class rpcSender(object):
          'connectionAttemptLimit':10,
          'connectionAttemptSleepTime':1,
          'addSpeedStats':True,
-         'protocolDefault':protocolDefault
+         'protocolDefault':protocolDefault,
+         'timeout':300,
+         'redirectErrorsToLog':1,  # set log-level for errors
       }
       self._sockClass=self._server._socketClass() if keepSocketClass else None
+
+   # def _error(self, data):
+   #    if isFunction(self.settings['redirectErrorsToLog']):
+   #       self.settings['redirectErrorsToLog'](data)
+   #    elif self.settings['redirectErrorsToLog'] is not False:
+   #       self._server._logger((self.settings['redirectErrorsToLog'] if isInt(self.settings['redirectErrorsToLog']) else 1), data)
+   #    else:
+   #       self._server._throw(data)
 
    def __constructRequest_jsonrpc(self, stack):
       oneRequest=True
@@ -84,7 +94,7 @@ class rpcSender(object):
                dataRaw.append({'jsonrpc': '2.0', 'method': s[0], 'params':s[1], 'id':rid})
          if oneRequest: dataRaw=dataRaw[0]
       else:
-         self._server._throw('incorrect <stack> format for <rpcSender>')
+         self._server._throw('Incorrect <stack> format for <rpcSender>')
       try:
          data=self._server._serializeJSON(dataRaw)
       except Exception, e:
@@ -114,9 +124,9 @@ class rpcSender(object):
 
    def __selectProtocol_rpcHttp(self, p, api, sockClass):
       if p=='uds':
-         return UnixHTTPConnection(api, socketClass=sockClass)
-      elif p=='http':
-         return httplib.HTTPConnection(api)
+         return UnixHTTPConnection(api, timeout=self.settings['timeout'], socketClass=sockClass)
+      elif p=='tcp':
+         return httplib.HTTPConnection(api, timeout=self.settings['timeout'])
       else:
          self._server._throw('<rpcSender> dont know this protocol "%s"'%(p))
 
@@ -141,8 +151,8 @@ class rpcSender(object):
             conn=self.__selectProtocol_rpcHttp(protocol, api, sockClass)
             conn.request('POST', path, data, headers)
             break
-         except Exception, e:
-            err=e
+         except Exception:
+            err=getErrorInfo()
             if self.settings['connectionAttemptSleepTime']:
                self._server._sleep(self.settings['connectionAttemptSleepTime'])
          i+=1
@@ -201,7 +211,7 @@ class rpcSender(object):
                results[waitResults[d['id']]]=d['result']
          return results
 
-   def ex(self, api, path, stack, cb=None, cbData=None):
+   def ex(self, api, path, stack, cb=None, cbData=None, redirectErrorsToLog=None):
       """
       Расширенная обертка над обычным rpc вызовом.
 
@@ -209,6 +219,8 @@ class rpcSender(object):
       Если <cb> задан, он будет вызван для каждого запроса по завершении. Формат вызова (currentApi, result, error, <cbData>). Можно задать <cb> равным False, тогда он вызван не будет. Управление родительскому потоку передастся сразу, без ожидания завершения.
       В противном случае произойдет ожидание выполнения всех запросов и их результаты вернутся в виде массива.
       """
+      if redirectErrorsToLog is None:
+         redirectErrorsToLog=self.settings['redirectErrorsToLog']
       oneRequest=not isinstance(api, (tuple, list))
       api=api if not oneRequest else (api,)
       _callAsync=self._server.callAsync
@@ -220,14 +232,14 @@ class rpcSender(object):
          checkerMap=[]
          for i, apiOne in enumerate(api):
             checkerMap.append((i, _callAsync(_sendRequest, args=(apiOne, path, stack), forceNative=False, returnChecker=True, wait=False)))
-         # now wait for completing
+         # now waiting for completion
          c=len(res)
          while c>0:
             for i, checker in checkerMap:
                _sleep(0.01)
                s, r, e=checker()
                if not s: continue
-               if e: raise e
+               if e: self._server._throw(e)  #! при ошибке последующие ответы теряются
                c-=1
                res[i]=r
          return res[0] if oneRequest else res
@@ -239,7 +251,7 @@ class rpcSender(object):
          else:
             tFunc_cb=None
          for apiOne in api:
-            _callAsync(_sendRequest, args=(apiOne, path, stack), forceNative=False, wait=False, cb=tFunc_cb, cbData=(cb, apiOne, cbData))
+            _callAsync(_sendRequest, args=(apiOne, path, stack), forceNative=False, wait=False, cb=tFunc_cb, cbData=(cb, apiOne, cbData), redirectErrorsToLog=redirectErrorsToLog)
 
 class jsonBackendWrapper(object):
    """
@@ -484,6 +496,46 @@ def checkPath(s):
       return True
    except Exception, e:
       return False
+
+def getErrorInfo():
+   """
+   This method return info about last exception.
+
+   :return str:
+   """
+   return traceback.format_exc()
+
+   tArr=inspect.trace()[-1]
+   fileName=tArr[1]
+   lineNo=tArr[2]
+   exc_obj=sys.exc_info()[1]
+   s='%s:%s > %s'%(fileName, lineNo, exc_obj)
+   sys.exc_clear()
+   return s
+
+def formatPath(path=''):
+   """
+   This method format path and add trailing slashs.
+
+   :params str path:
+   :return str:
+   """
+   if not path:
+      return '/'
+   else:
+      path=path if path[0]=='/' else '/'+path
+      path=path if path[-1]=='/' else path+'/'
+      return path
+
+def calcMimeType(request):
+   """
+   This method generate mime-type of response by given <request>.
+
+   :param dict request:
+   :return str:
+   """
+   return 'text/javascript' if request['method']=='GET' else 'application/json'
+
 #========================================
 import decimal, types, collections
 

@@ -42,7 +42,8 @@ class moreAsync:
       # add link to server
       if self.server is None: self.server=server
       # add backup for old methods
-      if not hasattr(self.server, '_moreAsync_backup'): setattr(self.server, '_moreAsync_backup', {})
+      if not hasattr(self.server, '_moreAsync_backup'):
+         setattr(self.server, '_moreAsync_backup', {})
       self.server._moreAsync_backup[self.method]=getattr(server, self.method)
       # overload method
       setattr(server, self.method, self.wrapper)
