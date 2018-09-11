@@ -8,6 +8,9 @@ class mySharedMethods:
       # Sipmly return random value (0..mult)
       return int(random.random()*65536)
 
+   def error(self):
+      raise ValueError('Some error simulated!')
+
 class mySharedMethods2:
    def random(self):
       # Sipmly return random value (0..mult)
@@ -15,6 +18,7 @@ class mySharedMethods2:
 
 def echo(data='Hello world!'):
    # Simply echo
+   print '>>'
    return data
 echo._alias='helloworld' #setting alias for method
 
@@ -89,7 +93,15 @@ That is the end of the program. All you need now it to download the complete wor
    """
    return s
 
-big._alias=['bigdata', 'compressed'] #setting alias for method
+big._alias=['bigdata', 'compressed']  #setting alias for method
+
+def errorPostprocess(request, server, controller):
+   print '<<<<<<<<<<<<<'
+   print request
+   print server
+   print controller.lastResponse
+   print '>>>>>>>>>>>>>'
+   controller.skip()
 
 if __name__=='__main__':
    print 'Running api..'
@@ -107,7 +119,9 @@ if __name__=='__main__':
    #    <notifBackend>     set exec-backend for Notify-requests
    #    <servBackend>      set serving-backend ('pywsgi', 'werkzeug', 'wsgiex' or 'auto'). 'auto' is more preffered
    #    <experimental>     switch using of experimental perfomance-patches
-   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=False, debug=False, log=3, fallback=True, allowCompress=False, compressMinSize=100*1024, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000], servBackend='auto')
+   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=False, debug=False, log=3, fallback=True, allowCompress=False, compressMinSize=100*1024, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=False, servBackend='auto', experimental=False)
+   #
+   server.postprocessAdd('cb', errorPostprocess, status=[-32603, 500])
    # Register dispatcher for all methods of instance
    server.registerInstance(mySharedMethods(), path='/api')
    # same name, but another path
