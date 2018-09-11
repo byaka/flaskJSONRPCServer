@@ -978,7 +978,7 @@ class flaskJSONRPCServer:
       else: nBckId=self._registerExecBackend(notifBackend, notif=True)
       # extract arguments
       _args, _, _, _=inspect.getargspec(dispatcher)
-      _args=tuple([s for i, s in enumerate(_args) if not(i==0 and s=='self')])
+      _args=tuple(s for i, s in enumerate(_args) if not(i==0 and (s=='self' or s=='cls')))
       # add dispatcher to routes
       self.routes[path][name]={'allowJSONP':fallback, 'link':dispatcher, 'dispatcherBackendId':dBckId, 'notifBackendId':nBckId, 'args':_args}
       if hasattr(dispatcher, '__func__'):
@@ -1462,7 +1462,7 @@ class flaskJSONRPCServer:
          currentDispatcherLink=currentDispatcher['link']
          _args=self.routes[request['path']][data['method']]['args']
          if isDict(data['params']):
-            params=data['params']
+            params=data['params'].copy()
          elif isArray(data['params']):  #convert *args to **kwargs
             for i, v in enumerate(data['params']): params[_args[i]]=v
          magicVarForDispatcher=self.__settings['magicVarForDispatcher']
@@ -1798,16 +1798,16 @@ class flaskJSONRPCServer:
          out['status']=status
          out['headers']=headers
       def tFunc_wrapper(*args, **kwargs):
-         out['result']=self._requestHandler(*args, **kwargs)[0]
-      self._thread(target=tFunc_wrapper, args=(request, tFunc_start_response), kwargs={'prepRequest':False}).join()
-      if out['status']=='200 OK' and 'result' in out['result']:
+         out['result']=self._requestHandler(*args, **kwargs)
+      self._thread(target=tFunc_wrapper, args=(request, tFunc_start_response), kwargs={'prepRequest':False, 'returnRaw':True}).join()
+      if out['status']=='200 OK' and  'result' in out['result']:
          return out['result']['result'], out['headers']
       elif 'error' in out['result']:
          self._throw(out['result']['error']['message'])
       else:
          self._throw('%s: %s'%(out['status'], out['result']))
 
-   def _requestHandler(self, env, start_response, prepRequest=True):
+   def _requestHandler(self, env, start_response, prepRequest=True, returnRaw=False):
       """
       This method is callback, that will be called by WSGI or another backend for every request.
       It implement error's handling of <server>._requestProcess() and some additional funtionality.
@@ -1853,11 +1853,13 @@ class flaskJSONRPCServer:
          # call postprocessers
          try:
             pp=postprocess(self, self.__settings['postprocess'])
-            status, headers, data=pp(request, status, headers, data, dataRaw)
+            status, headers, dataRaw=pp(request, status, headers, data, dataRaw)
+            data=dataRaw if isString(dataRaw) else self._serializeJSON(dataRaw)
          except Exception:
             e=getErrorInfo()
             self._logger(1, 'ERROR in postprocesser: %s'%e)
-            status, headers, data=(500, {}, e)
+            status, headers, dataRaw=(500, {}, e)
+            data=dataRaw
       # convert status to http-status
       if not isString(status): status=self._toHttpStatus(status)
       # convert string-data to iterator
@@ -1869,7 +1871,7 @@ class flaskJSONRPCServer:
       if self.__settings['blocking']: self._deepUnlock()
       if self.__settings['controlGC']: self._controlGC()  # call GC manually
       start_response(status, headers)
-      return data
+      return dataRaw if returnRaw else data
 
    def _requestProcess(self, request):
       """
@@ -1903,8 +1905,16 @@ class flaskJSONRPCServer:
          request_path=request['path']=formatPath('/'.join(tArr[:-1]))
       # don't process request with unknown path
       if request_path not in self.routes:
+         if request_method!='GET':
+            # special checking of previous level, allows to migrate from REST
+            tArr=request_path[1:-1].split('/')
+            if tArr[-1]:
+               tmp_path=formatPath('/'.join(tArr[:-1]))
+               if tmp_path in self.routes:
+                  self._logger(3, 'Unknown path (but known previous level):', request_path)
+                  return (404, {}, 'Not found, but known previous level: %s'%(tmp_path), None)
          self._logger(3, 'Unknown path:', request_path)
-         return (404, {}, 'Not Found', None)
+         return (404, {}, 'Not found', None)
       # start processing request
       outHeaders={}
       outCookies=[]
@@ -2044,21 +2054,22 @@ class flaskJSONRPCServer:
             dataOut=self._serializeJSON(dataOut)
       elif request_method=='GET':  #JSONP fallback
          out=None
+         jsonpCB='%s;'
          self._logger(4, 'REQUEST:', request_fileName, request_args)
-         dataIn=[{'method':request_fileName, 'params':request_args, 'id':uniqueId}]
-         request['dataParsed']=[{'method':request_fileName, 'params':request_args, 'id':uniqueId}]
-         request['dataStatus']=True
-         jsonpCB=request_args.get('jsonp', False)
-         jsonpCB='%s(%%s);'%(jsonpCB) if jsonpCB else '%s;'
          if request_fileName not in self.routes[request_path]:  #call of unknown method
             out={"error":{"code": -32601, "message": "Method not found"}}
          elif not self.routes[request_path][request_fileName]['allowJSONP']:  #fallback to JSONP denied
             self._logger(2, 'JSONP_DENIED:', request_path, request_fileName)
             return (403, {}, 'JSONP_DENIED', None)
          else:  #process correct request
-            if 'jsonp' in request_args: del request_args['jsonp']
             # generate unique id
             uniqueId='%s--%s--%s--%s--%i--%i'%(request_fileName, request_ip, self._sha1(self._serializeJSON(request_args)), getms(), random.random()*sys.maxint, random.random()*sys.maxint)
+            # dataIn=[{'method':request_fileName, 'params':request_args, 'id':uniqueId}]
+            request['dataParsed']=[{'method':request_fileName, 'params':request_args, 'id':uniqueId}]
+            request['dataStatus']=True
+            _jsonpCB=request_args.pop('jsonp', False)
+            if _jsonpCB:
+               jsonpCB='%s(%%s);'%(_jsonpCB)
             # <id> passed like for normal request
             dataIn=request['dataParsed'][0]
             # select dispatcher
