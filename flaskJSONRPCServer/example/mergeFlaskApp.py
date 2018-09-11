@@ -2,7 +2,7 @@
 import sys, time, random
 
 #FLASK
-from flask import Flask
+from flask import Flask, request
 
 from flaskJSONRPCServer import flaskJSONRPCServer
 
@@ -16,9 +16,40 @@ def stats(_connection=None):
    return _connection.server.stats(inMS=True) #inMS=True return stats in milliseconds
 
 app=Flask(__name__)
-@app.route('/helloworld', methods=['GET'])
+@app.route('/readpost', methods=['POST'])
+def flaskReadpost1():
+   print 'flaskReadpost1 called'
+   d=request.data
+   s='{"jsonrpc": "2.0", "result":"You sended %s", "id": 1}'%(d.replace('"', '\\"'))
+   return s
+
+app2=Flask(__name__)
+@app2.route('/helloworld', methods=['GET'])
 def flaskHelloworld():
    return 'Hello world!'
+
+@app2.route('/readpost', methods=['POST'])
+def flaskReadpost2():
+   print 'flaskReadpost2 called'
+   d=request.data
+   s='{"jsonrpc": "2.0", "result":"(REWRITED_WITH_flaskReadpost2) You sended %s", "id": 1}'%(d.replace('"', '\\"'))
+   return s
+
+def fakeWSGI1(env, start_response):
+   d=env['wsgi.input'].read(10)+env['wsgi.input'].read(10)
+   print 'fakeWSGI1 called', d
+   env['flaskJSONRPCServer_skip']()
+
+def fakeWSGI2(env, start_response):
+   d=env['wsgi.input'].read(3)+env['wsgi.input'].read(20)+env['wsgi.input'].read()
+   print 'fakeWSGI2 called', d
+   env['flaskJSONRPCServer_skip']()
+
+def ppCB1(request, server, controller):
+   d=server._loadPostData(request)
+   print 'ppCB1 called', d
+   # return 200, '{"jsonrpc": "2.0", "result":"HI!", "id": 1}'
+   controller.skip()
 
 if __name__=='__main__':
    print 'Running api..'
@@ -36,13 +67,16 @@ if __name__=='__main__':
    #    <notifBackend>     set exec-backend for Notify-requests
    #    <servBackend>      set serving-backend ('pywsgi', 'werkzeug', 'wsgiex' or 'auto'). 'auto' is more preffered
    #    <experimental>     switch using of experimental perfomance-patches
-   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=True, gevent=True, debug=False, log=3, fallback=True, allowCompress=False, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000])
+   server=flaskJSONRPCServer(("0.0.0.0", 7001), blocking=False, cors=False, gevent=True, debug=False, log=3, fallback=True, allowCompress=False, jsonBackend='simplejson', notifBackend='simple', tweakDescriptors=[1000, 1000], servBackend='auto')
    # Register dispatchers for single functions
    server.registerFunction(echo, path='/api')
    server.registerFunction(stats, path='/api')
    # merge with Flask app
-   server.flaskApp=app
-   server.flaskAppName=__name__
+   server.postprocessAdd_wsgi(app, status=404)
+   server.postprocessAdd_wsgi(fakeWSGI1, status=404)
+   server.postprocessAdd_wsgi(fakeWSGI2, status=404)
+   server.postprocessAdd_wsgi(app2, status=404)
+   server.postprocessAdd_cb(ppCB1, status=404)
    # Run server
    server.serveForever()
    # Now you can access this api by path http://127.0.0.1:7001/api for JSON-RPC requests
