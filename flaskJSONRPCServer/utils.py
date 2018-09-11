@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import httplib, sys, os, time, collections, random, inspect, traceback
+import httplib, sys, os, time, collections, random, inspect, traceback, code
 from virtVar import virtVar
 import gmultiprocessing
 
-__all__=['PY_V', 'magicDict', 'magicDictCold', 'MagicDict', 'MagicDictCold', 'dict2magic', 'gmultiprocessing', 'rpcSender', 'virtVar', 'deque2', 'UnixHTTPConnection', 'console', 'prepDataForLogger', 'getms', 'randomEx', 'randomEx_default_soLong', 'strGet', 'getScriptName', 'getScriptPath', 'checkPath', 'getErrorInfo', 'formatPath', 'calcMimeType']
+__all__=['PY_V', 'magicDict', 'magicDictCold', 'MagicDict', 'MagicDictCold', 'dict2magic', 'gmultiprocessing', 'rpcSender', 'virtVar', 'deque2', 'UnixHTTPConnection', 'console', 'prepDataForLogger', 'getms', 'randomEx', 'randomEx_default_soLong', 'strGet', 'getScriptName', 'getScriptPath', 'checkPath', 'getErrorInfo', 'formatPath', 'calcMimeType', 'bind']
 __all__+=['jsonBackendWrapper', 'filelikeWrapper']
 __all__+=['isGen', 'isGenerator', 'isFunc', 'isFunction', 'isIter', 'isIterable', 'isClass', 'isInstance', 'isModule', 'isModuleBuiltin', 'isString', 'isStr', 'isBool', 'isNum', 'isFloat', 'isInt', 'isArray', 'isList', 'isTuple', 'isDict', 'isObject', 'isSet']
 
@@ -337,17 +337,76 @@ def dict2magic(o, recursive=False):
       o=MagicDict(o)
    return o
 
+def bind(f, defaultsUpdate=None, globalsUpdate=None, name=None):
+   """
+   Returns new function, similar as <f>, but with redefined default keyword-arguments values and updated globals.
+
+   It have similar use-cases like `functools.partial()`, but executing few times faster (with cost of longer initialisation) and also faster than original function, if you pass alot args.
+
+   :param func f:
+   :param str name:
+   :param dict globalsUpdate: Update global-env for new function, but only for this function, so not modify real globals
+   :param dict defaultsUpdate: Update default keyword-arguments
+   """
+   p={
+      'name':name or f.func_name+'_BINDED',
+      'code':f.func_code,
+      'globals':f.func_globals,
+      'argdefs':f.func_defaults,
+      'closure':f.func_closure
+   }
+   if globalsUpdate:
+      p['globals']=p['globals'].copy()
+      p['globals'].update(globalsUpdate)
+   if defaultsUpdate:
+      _args=inspect.getargs(f.func_code)[0]
+      _defsL=len(p['argdefs'])
+      _offset=len(_args)-_defsL
+      p['argdefs']=list(p['argdefs'])
+      for i in xrange(_defsL):
+         k=_args[i+_offset]
+         if k in defaultsUpdate:
+            p['argdefs'][i]=defaultsUpdate[k]
+      p['argdefs']=tuple(p['argdefs'])
+   f2=types.FunctionType(**p)
+   f2.__dict__=f.__dict__
+   f2.__module__=f.__module__
+   f2.__doc__=f.__doc__
+   if isinstance(f, types.MethodType):
+      f2=types.MethodType(f2, f.im_self, f.im_class)
+   return f2
+
 consoleColor=magicDict({
-   'header':'\033[95m',
-   'okBlue':'\033[94m',
-   'okGreen':'\033[92m',
-   'ok':'\033[92m',
-   'warning':'\033[93m',
-   'fail':'\033[91m',
-   'bold':'\033[1m',
-   'end':'\033[0m',
-   'underline':'\033[4m',
-   'clearLast':'\033[F\033[K'
+   # predefined colors
+   'fail':'\x1b[91m',
+   'ok':'\x1b[92m',
+   'warning':'\x1b[93m',
+   'okblue':'\x1b[94m',
+   'header':'\x1b[95m',
+   # colors
+   'black':'\x1b[30m',
+   'red':'\x1b[31m',
+   'green':'\x1b[32m',
+   'yellow':'\x1b[33m',
+   'blue':'\x1b[34m',
+   'magenta':'\x1b[35m',
+   'cyan':'\x1b[36m',
+   'white':'\x1b[37m',
+   # background colors
+   'bgblack':'\x1b[40m',
+   'bgred':'\x1b[41m',
+   'bggreen':'\x1b[42m',
+   'bgyellow':'\x1b[43m',
+   'bgblue':'\x1b[44m',
+   'bgmagenta':'\x1b[45m',
+   'bgcyan':'\x1b[46m',
+   'bgwhite':'\x1b[47m',
+   # specials
+   'light':'\x1b[2m',
+   'bold':'\x1b[1m',
+   'underline':'\x1b[4m',
+   'clearLast':'\x1b[F\x1b[K',
+   'end':'\x1b[0m'
 })
 
 def consoleClear():
@@ -363,11 +422,39 @@ def consoleIsTerminal():
    """
    return sys.stdout.isatty()
 
+def consoleSize():
+   if not sys.stdout.isatty():
+      return INFINITY, INFINITY
+   import fcntl, termios, struct
+   h, w, hp, wp=struct.unpack('HHHH', fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0)))
+   return w, h
+
+def consoleRepair():
+   # https://stackoverflow.com/a/24780259/5360266
+   os.system('stty sane')
+
+def consoleInteract(local=None, msg=None):
+   local=(local or {}).copy()
+   def tFunc():
+      raise SystemExit
+   local['exit']=tFunc
+   try:
+      if msg is None:
+         msg='-'*50
+         msg+='\nInteractive session, for return back use `exit()`'
+      code.interact(banner=msg, local=local)
+   except SystemExit: pass
+
 global console
 console=magicDict({
+   'interact':consoleInteract,
    'clear':consoleClear,
    'inTerm':consoleIsTerminal,
-   'color':consoleColor
+   'color':consoleColor,
+   'repair':consoleRepair,
+   'size':consoleSize,
+   'width':lambda: consoleSize()[0],
+   'height':lambda: consoleSize()[1],
 })
 
 def getms(inMS=True):
