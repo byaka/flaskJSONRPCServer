@@ -1,6 +1,0 @@
-With concurrency 10 ( n|t|e 600|0|0 ): min=4ms, max=27ms, median=15ms, trimean=15ms, average=15ms
-With concurrency 20 ( n|t|e 1200|0|0 ): min=10ms, max=39ms, median=23ms, trimean=23ms, average=23ms
-With concurrency 40 ( n|t|e 2400|0|0 ): min=16ms, max=59ms, median=36ms, trimean=36ms, average=36ms
-With concurrency 80 ( n|t|e 4720|0|0 ): min=17ms, max=108ms, median=61ms, trimean=62ms, average=62ms
-With concurrency 160 ( n|t|e 9440|0|0 ): min=29ms, max=197ms, median=99ms, trimean=99ms, average=100ms
-With concurrency 320 ( n|t|e 17920|0|0 ): min=52ms, max=354ms, median=183ms, trimean=184ms, average=184ms
