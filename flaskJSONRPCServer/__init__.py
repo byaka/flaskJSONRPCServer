@@ -518,7 +518,7 @@ class flaskJSONRPCServer:
       """
       return self._pid!=os.getpid()
 
-   def _fileGet(self, fName, mode='r'):
+   def _fileGet(self, fName, mode='r', silent=True, buffer=-1):
       """
       This method open file and read content in mode <mode>, if file is archive then open it and find file with name <mode>.
 
@@ -527,24 +527,25 @@ class flaskJSONRPCServer:
 
       :param str fName: Path to file.
       :param str mode: Read-mode or file name.
+      :param bool silent: Allow suppress errors.
+      :param int buffer: Same as standart python's buffering.
       :return str:
       """
       fName=fName.encode('cp1251')
       if not os.path.isfile(fName): return None
-      f=None
+      if self.__settings['gevent']: self._tryGevent()
       try:
-         f=open(fName, mode)
-         if self.__settings['gevent']:
-            self._tryGevent()
-            f=geventFileObjectThread(f)
-         s=f.read()
+         with open(fName, mode, buffer) as f:
+            if self.__settings['gevent']:
+               f=geventFileObjectThread(f)
+            s=f.read()
       except Exception, e:
+         if not silent: raise
          self._logger(1, 'Error fileGet', fName, ',', mode, e)
          s=None
-      if f is not None: f.close()
       return s
 
-   def _fileWrite(self, fName, text, mode='w'):
+   def _fileWrite(self, fName, text, mode='w', silent=False, buffer=-1):
       """
       This method write content to file with specific mode.
       If mode is 'a' method append data to the end of file.
@@ -552,19 +553,21 @@ class flaskJSONRPCServer:
       :param str text:
       :param str fName: Path to file.
       :param str mode: Write-mode.
+      :param bool silent: Allow suppress errors.
+      :param int buffer: Same as standart python's buffering.
       :return str:
       """
-      if not isString(text): text=self._serializeJSON(text)
-      f=None
+      if not isString(text):
+         text=self._serializeJSON(text)
+      if self.__settings['gevent']: self._tryGevent()
       try:
-         f=open(fName, mode)
-         if self.__settings['gevent']:
-            self._tryGevent()
-            f=geventFileObjectThread(f)
-         f.write(text)
+         with open(fName, mode, buffer) as f:
+            if self.__settings['gevent']:
+               f=geventFileObjectThread(f)
+            f.write(text)
       except Exception, e:
+         if not silent: raise
          self._logger(1, 'Error fileWrite', fName, ',', mode, e)
-      if f is not None: f.close()
 
    def _sha1(self, text, onError=None):
       """
@@ -627,8 +630,8 @@ class flaskJSONRPCServer:
       :param dict kwargs:
       :param bool forceNative:
       """
-      args=args or []
-      kwargs=kwargs or {}
+      args=() if args is None else args
+      kwargs={} if kwargs is None else kwargs
       if not self.__settings['gevent']:
          t=threading.Thread(target=target, args=args, kwargs=kwargs)
          t.daemon=True
@@ -641,12 +644,13 @@ class flaskJSONRPCServer:
             else:
                try:
                   thr=geventMonkey.get_original('threading', 'Thread')
-               except:
+               except Exception:
                   self._throw('Cant find nativeThread implementation in gevent')
                t=thr(target=target, args=args, kwargs=kwargs)
                t.start()
          else:
-            t=gevent.spawn(target, *args, **kwargs)
+            t=gevent.Greenlet(target, *args, **kwargs)
+            t.start()
       return t
 
    def callAsync(self, target, args=None, kwargs=None, sleepTime=0.3, sleepMethod=None, returnChecker=False, wait=True, forceNative=True, cb=None, cbData=None, redirectErrorsToLog=False):
@@ -691,26 +695,20 @@ class flaskJSONRPCServer:
          try:
             link['result']=target(*args, **kwargs)
          except Exception, e:
-            # print getErrorInfo()
             link['error']=e
          if cb:
             cb(link['result'], link['error'], cbData)
          link['inProgress']=False
-         if save:
-            print '?', link['target'], save
-         try:
-            if not save:
-               del self._callAsync_queue[cId]
-               if link['error']:
-                  if redirectErrorsToLog is not False:
-                     if isFunction(redirectErrorsToLog): redirectErrorsToLog(link)
-                     else:
-                        self._logger((redirectErrorsToLog if isInt(redirectErrorsToLog) else 1), str(link['error']))
+         if not save:
+            del self._callAsync_queue[cId]
+            if link['error']:
+               if redirectErrorsToLog is not False:
+                  if isFunction(redirectErrorsToLog): redirectErrorsToLog(link)
                   else:
-                     e=link['error']
-                     raise e
-         except:
-            print '!', getErrorInfo()
+                     self._logger((redirectErrorsToLog if isInt(redirectErrorsToLog) else 1), str(link['error']))
+               else:
+                  e=link['error']
+                  raise e
       # call in native thread
       self._callAsync_queue[cId]['_thread']=self._thread(tFunc_wrapper, args=[self, cId, target, args, kwargs, save, cb, cbData], forceNative=forceNative)
       if not save: return
@@ -739,7 +737,8 @@ class flaskJSONRPCServer:
             if redirectErrorsToLog is not False:
                self._logger((redirectErrorsToLog if isInt(redirectErrorsToLog) else 1), str(err))
                return
-            else: raise err
+            else:
+               raise err
          else: return res
 
    def _socketClass(self):
@@ -760,13 +759,17 @@ class flaskJSONRPCServer:
       """
       if forceNative or not self.__settings['gevent']: return raw_input(msg)
       else:
-         if msg: sys.stdout.write(msg)
+         if msg:
+            sys.stdout.write(msg)
+            sys.stdout.flush()
          self._socketClass().wait_read(sys.stdin.fileno())
-         return sys.stdin.readline()
+         s=sys.stdin.readline()
+         return s[:-1]  # removing trailing linebreak
 
    def _sleep(self, s, forceNative=False):
       """
-      This method is wrapper above time.sleep() or gevent.sleep(). Method swithing automatically, if <forceNative> is False. If it's True, always use unpatched time.sleep().
+      This method is wrapper around `time.sleep()` and `gevent.sleep()`. Method swithing automatically, if <forceNative> is `False`. If it's `True`, always use unpatched `time.sleep()`.
+      For more info about `0` value see https://github.com/gevent/gevent/issues/744#issuecomment-185646372.
 
       :param float s: Delay in seconds.
       :param bool forceNative:
@@ -1464,6 +1467,9 @@ class flaskJSONRPCServer:
          if isDict(data['params']):
             params=data['params'].copy()
          elif isArray(data['params']):  #convert *args to **kwargs
+            if len(data['params'])>len(_args):
+               self.processingDispatcherCount-=1
+               return False, params, 'Too many arguments'
             for i, v in enumerate(data['params']): params[_args[i]]=v
          magicVarForDispatcher=self.__settings['magicVarForDispatcher']
          if magicVarForDispatcher in _args:  #add magicVarForDispatcher if requested
@@ -2064,7 +2070,6 @@ class flaskJSONRPCServer:
          else:  #process correct request
             # generate unique id
             uniqueId='%s--%s--%s--%s--%i--%i'%(request_fileName, request_ip, self._sha1(self._serializeJSON(request_args)), getms(), random.random()*sys.maxint, random.random()*sys.maxint)
-            # dataIn=[{'method':request_fileName, 'params':request_args, 'id':uniqueId}]
             request['dataParsed']=[{'method':request_fileName, 'params':request_args, 'id':uniqueId}]
             request['dataStatus']=True
             _jsonpCB=request_args.pop('jsonp', False)
