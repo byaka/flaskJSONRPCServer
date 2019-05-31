@@ -323,6 +323,7 @@ class flaskJSONRPCServer:
          if forceDelete: del sys.modules[k]
       for m in sys.modules.keys():  #creating copy of keys avoids "dictionary changed size during iteration" error
          # if m.startswith('flaskJSONRPCServer'): continue
+         if m=='six.moves': continue  #here contained ALL modules for lazy-importing, so we skip it
          if m.startswith('gevent'): continue
          if m in modules: continue
          for k in dir(sys.modules[m]):
@@ -466,9 +467,7 @@ class flaskJSONRPCServer:
       res={}
       try:
          f=open('/proc/%s/status'%pid)
-         if self.__settings['gevent']:
-            self._tryGevent()
-            f=geventFileObjectThread(f)
+         f=self._fileObj(f)
          for s in f:
             parts=s.split()
             key=parts[0][2:-1].lower()
@@ -518,6 +517,12 @@ class flaskJSONRPCServer:
       """
       return self._pid!=os.getpid()
 
+   def _fileObj(self, f):
+      if self.__settings['gevent']:
+         self._tryGevent()
+         f=geventFileObjectThread(f)
+      return f
+
    def _fileGet(self, fName, mode='r', silent=True, buffer=-1):
       """
       This method open file and read content in mode <mode>, if file is archive then open it and find file with name <mode>.
@@ -536,8 +541,7 @@ class flaskJSONRPCServer:
       if self.__settings['gevent']: self._tryGevent()
       try:
          with open(fName, mode, buffer) as f:
-            if self.__settings['gevent']:
-               f=geventFileObjectThread(f)
+            f=self._fileObj(f)
             s=f.read()
       except Exception, e:
          if not silent: raise
@@ -562,8 +566,7 @@ class flaskJSONRPCServer:
       if self.__settings['gevent']: self._tryGevent()
       try:
          with open(fName, mode, buffer) as f:
-            if self.__settings['gevent']:
-               f=geventFileObjectThread(f)
+            f=self._fileObj(f)
             f.write(text)
       except Exception, e:
          if not silent: raise
@@ -1574,7 +1577,7 @@ class flaskJSONRPCServer:
          c+=gc.collect(i)
       m2=self._countMemory()
       if c and m1 and m2:
-         self._logger(3, 'GC executed manually: collected %s objects, memore freed %smb, used %smb, peak %smb'%(c, round((m1['now']-m2['now'])/1024.0, 1), round(m2['now']/1024.0, 1), round(m2['peak']/1024.0, 1)))
+         self._logger(3, 'GC executed manually: collected %s objects, memory freed %smb, used %smb, peak %smb'%(c, round((m1['now']-m2['now'])/1024.0, 1), round(m2['now']/1024.0, 1), round(m2['peak']/1024.0, 1)))
       self._speedStatsAdd('controlGC', getms()-mytime)
       self._gcStats['lastTime']=getms(False)
       self._gcStats['processedRequestCount']=0

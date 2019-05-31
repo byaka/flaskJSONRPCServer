@@ -132,7 +132,7 @@ def _patchServer(server):
             mytime=getms()
             res=asyncjson.dumps(data, maxProcessTime=0.1, cb=lambda *args:server._sleep(0.001))
             speed=getms()-mytime
-            server._logger(4, 'asyncJSON.dumps: %smb, %ss'%(round(size/1024.0/1024.0, 2), round(speed/1000.0, 1)))
+            server._logger(4, 'asyncJSON.dumps: %smb, %ss'%(round(size/1024.0/1024.0, 2), round(speed/1000.0, 2)))
             return res
          # wrapper for json.loads with auto-switching
          def tFunc_loads(data, server=server, **kwargs):
@@ -142,7 +142,7 @@ def _patchServer(server):
             mytime=getms()
             res=asyncjson.loads(data, maxProcessTime=0.1, cb=lambda:server._sleep(0.001))
             speed=getms()-mytime
-            server._logger(4, 'asyncJSON.loads: %smb, %ss'%(round(size/1024.0/1024.0, 2), round(speed/1000.0, 1)))
+            server._logger(4, 'asyncJSON.loads: %smb, %ss'%(round(size/1024.0/1024.0, 2), round(speed/1000.0, 2)))
             return res
          server.jsonBackend=jsonBackendWrapper(tFunc_dumps, tFunc_loads)
 
@@ -161,18 +161,28 @@ def initGlobal(scope):
    pass
 
 if __name__=='__main__':
-   obj=[[{"jsonrpc": "2.0", "method": u"привет", "params": [{"jsonrpc": "1.0", "method": "test2", "params": {"param1": -23, "param2": 42.2, "param3":True, "param4":False, "param5":None, "param6":u'[{"jsonrpc": "2.0", "method": "привет", "params": [{"jsonrpc": "1.0", "method": "test2", "params": {"param1": -23, "param2": 42.2, "param3":True, "param4":False, "param5":None}, "id": 3}, 23.123], "id": 1}]'}, "id": 3}, 23.123], "id": 1}]]
+   import asyncjson, json
+
+   # obj=[[{"jsonrpc": "2.0", "method": u"привет", "params": [{"jsonrpc": "1.0", "method": "test2", "params": {"param1": -23, "param2": 42.2, "param3":True, "param4":False, "param5":None, "param6":u'[{"jsonrpc": "2.0", "method": "привет", "params": [{"jsonrpc": "1.0", "method": "test2", "params": {"param1": -23, "param2": 42.2, "param3":True, "param4":False, "param5":None}, "id": 3}, 23.123], "id": 1}]'}, "id": 3}, 23.123], "id": 1}]]
    # obj={"id": '{"id": 1}'}
    # obj={'key1':'value"]', 'key2':'value:{2}'}
-   data=asyncJSON_dumps(obj)
+   obj={'k':'test "1\n1" 2\t2 test'}
+
    print 'ORIGINAL:', obj
-   print 'SERIALIZED:', data
+   data1=asyncjson.dumps(obj)
+   data2=asyncjson.dumps_native(obj)
+   data3=json.dumps(obj)
+   print 'SERIALIZED async compiled: %s'%(data1,)
+   print 'SERIALIZED async native  : %s'%(data2,)
+   print 'SERIALIZED default       : %s'%(data3,)
 
-   # import simplejson as json
-   # print json.dumps(obj)
-   # data=json.dumps(obj)
-
-   obj2=asyncJSON_loads(data)
-   print 'PARSED:', obj2
-   print obj==obj2
+   obj_p1=asyncjson.loads(data1)
+   obj_p2=asyncjson.loads_native(data2)
+   obj_p3=json.loads(data3)
+   print 'PARSED async compiled:', obj_p1
+   print 'PARSED async native  :', obj_p2
+   print 'PARSED default       :', obj_p3
+   print 'PARSED default 2     :', asyncjson.loads_native(data3)
+   print 'PARSED default 3     :', asyncjson.loads(data3)
+   print obj==obj_p1
    sys.exit(0)

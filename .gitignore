@@ -2,3 +2,6 @@
 /.command_for_convert_md_to_rst
 *.pyc
 /tmp
+*.o
+*.so
+*.cpp

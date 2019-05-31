@@ -61,7 +61,7 @@ def dumps(data, cb=None, maxProcessTime=0.3):
    elif (data is _true): return 'true'  #check value, not type
    elif (data is _false): return 'false'  #check value, not type
    elif (data is _none): return 'null'  #check value, not type
-   elif (tv is _str) or (tv is _unicode) or (tv is _basestring): return '"'+data+'"'
+   elif (tv is _str) or (tv is _unicode) or (tv is _basestring): return '"'+data.encode('unicode-escape').replace('"', '\\"')+'"'
    elif (tv is _int) or (tv is _float) or (tv is _long) or (tv is _complex) or (tv is _decimal): return '%s'%data
    else:
       # check base type also
@@ -77,7 +77,7 @@ def dumps(data, cb=None, maxProcessTime=0.3):
       elif (data is _true): return 'true'  #check value, not type
       elif (data is _false): return 'false'  #check value, not type
       elif (data is _none): return 'null'  #check value, not type
-      elif (tvb is _str) or (tvb is _unicode) or (tvb is _basestring): return '"'+data+'"'
+      elif (tvb is _str) or (tvb is _unicode) or (tvb is _basestring): return '"'+data.encode('unicode-escape').replace('"', '\\"')+'"'
       elif (tvb is _int) or (tvb is _float) or (tvb is _long) or (tvb is _complex) or (tvb is _decimal): return '%s'%data
    # walk through object without recursion
    while stack:
@@ -89,7 +89,7 @@ def dumps(data, cb=None, maxProcessTime=0.3):
          if i: _outAppend(', ')  #add separator
          if t:
             k, v=v
-            _outAppend('"'+k.replace('"', '\\"')+'":')  #add <key>
+            _outAppend('"'+k.encode('unicode-escape').replace('"', '\\"')+'":')  #add <key>
       except _StopIteration:
          _outAppend('}' if t else ']')
          continue
@@ -125,7 +125,7 @@ def dumps(data, cb=None, maxProcessTime=0.3):
          elif (v is _false): _outAppend('false')  #check value, not type
          elif (v is _none): _outAppend('null')  #check value, not type
          elif (tv is _str) or (tv is _unicode) or (tv is _basestring):
-            _outAppend('"'+v.replace('"', '\\"')+'"')
+            _outAppend('"'+v.encode('unicode-escape').replace('"', '\\"')+'"')
          elif (tv is _int) or (tv is _float) or (tv is _long) or (tv is _complex) or (tv is _decimal):
             _outAppend(_str(v))
          else:
@@ -155,7 +155,7 @@ def dumps(data, cb=None, maxProcessTime=0.3):
             elif (v is _false): _outAppend('false')  #check value, not type
             elif (v is _none): _outAppend('null')  #check value, not type
             elif (tvb is _str) or (tvb is _unicode) or (tvb is _basestring):
-               _outAppend('"'+v.replace('"', '\\"')+'"')
+               _outAppend('"'+v.encode('unicode-escape').replace('"', '\\"')+'"')
             elif (tvb is _int) or (tvb is _float) or (tvb is _long) or (tvb is _complex) or (tvb is _decimal):
                _outAppend(_str(v))
          # get next val
@@ -164,7 +164,7 @@ def dumps(data, cb=None, maxProcessTime=0.3):
             if i: _outAppend(', ')  #add separator
             if t:
                k, v=v
-               _outAppend('"'+k.replace('"', '\\"')+'":')  #add <key>
+               _outAppend('"'+k.encode('unicode-escape').replace('"', '\\"')+'":')  #add <key>
          except _StopIteration:
             _outAppend('}' if t else ']')  #add <end> symbol like }, ]
             break
@@ -216,7 +216,7 @@ def loads(data, cb=None, maxProcessTime=0.3):
          if v[0] is '"':
             if len(v)>1 and v[-1] is '"' and v[-2:]!='\\"':
                v=v[1:-1]  #crop quotes
-               if '\\' in v: v=v.replace('\\', '')  #correct escaping
+               if '\\' in v: v=v.decode('string-escape')  #correct escaping
                v=_unicode(v, 'utf-8')  #back to unicode
                # special check for map_key
                if part is ':':
@@ -225,7 +225,7 @@ def loads(data, cb=None, maxProcessTime=0.3):
                   continue
             else:
                # correcting string if it contain special symbols
-               if part: v=v+part
+               if part: v+=part
                continue
          else:
             v=_float(v) if '.' in v else _int(v)
@@ -283,5 +283,10 @@ def loads(data, cb=None, maxProcessTime=0.3):
 
 # replace with cython version if exist
 try:
-   from asyncjson_c import iterex, dumps, loads
+   iterex_native, dumps_native, loads_native=iterex, dumps, loads
+   #! сишная версия стала работать очень медленно, какаято регрессия
+   # from asyncjson_c import iterex, dumps, loads
 except ImportError: pass
+
+if __name__ == '__main__':
+   pass

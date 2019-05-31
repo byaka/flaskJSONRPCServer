@@ -76,7 +76,7 @@ def dumps(data, cb=None, float maxProcessTime=0.3):
    elif (data is True): return 'true'  #check value, not type
    elif (data is False): return 'false'  #check value, not type
    elif (data is None): return 'null'  #check value, not type
-   elif isinstance(data, (str, unicode, basestring)): return '"'+data+'"'
+   elif isinstance(data, (str, unicode, basestring)): return '"'+data.encode('unicode-escape').replace('"', '\\"')+'"'
    elif isinstance(data, (int, float, long, complex, Decimal)): return str(data)
    #walk through object without recursion
    while len(stack):
@@ -88,7 +88,7 @@ def dumps(data, cb=None, float maxProcessTime=0.3):
          if i: _outAppend(', ')  #add separator
          if t:
             k, v=v
-            _outAppend('"'+k.replace('"', '\\"')+'":')  #add <key>
+            _outAppend('"'+k.encode('unicode-escape').replace('"', '\\"')+'":')  #add <key>
       except StopIteration:
          _outAppend('}' if t else ']')
          continue
@@ -122,7 +122,7 @@ def dumps(data, cb=None, float maxProcessTime=0.3):
          elif v is True: _outAppend('true')  #check value, not type
          elif v is False: _outAppend('false')  #check value, not type
          elif v is None: _outAppend('null')  #check value, not type
-         elif isinstance(v, (str, unicode, basestring)): _outAppend('"'+v.replace('"', '\\"')+'"')
+         elif isinstance(v, (str, unicode, basestring)): _outAppend('"'+v.encode('unicode-escape').replace('"', '\\"')+'"')
          elif isinstance(v, (int, float, long, complex, Decimal)): _outAppend(str(v))
          # get next val
          try:
@@ -130,7 +130,7 @@ def dumps(data, cb=None, float maxProcessTime=0.3):
             if i: _outAppend(', ')  #add separator
             if t:
                k, v=v
-               _outAppend('"'+k.replace('"', '\\"')+'":')  #add <key>
+               _outAppend('"'+k.encode('unicode-escape').replace('"', '\\"')+'":')  #add <key>
          except StopIteration:
             _outAppend('}' if t else ']')  #add <end> symbol like }, ]
             break
@@ -183,7 +183,7 @@ def loads(sdata, cb=None, float maxProcessTime=0.3):
          if v[0] is '"':
             if len(v)>1 and v[-1] is '"' and v[-2:]!='\\"':
                v=v[1:-1]  #crop quotes
-               if '\\' in v: v=v.replace('\\', '')  #correct escaping
+               if '\\' in v: v=v.decode('string-escape')  #correct escaping
                v=unicode(v, 'utf-8')  #back to unicode
                # special check for map_key
                if part is ':':
