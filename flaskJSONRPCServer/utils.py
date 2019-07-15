@@ -55,7 +55,7 @@ class rpcSender(object):
       self._constructRequest=constructRequest or self.__constructRequest_jsonrpc
       self._parseResponse=parseResponse or self.__parseResponse_jsonrpc
       self._compress=False if compress is False else (compress or self.__compressRequest_gzip)
-      self._uncompress=False if uncompress is False else (uncompress or self.__uncompressRequest_gzip)
+      self._uncompress=False if uncompress is False else (uncompress or self.__uncompressResponse_gzip)
       self._uncompressHeader=False if uncompressHeader is False else (uncompressHeader or {'Accept-Encoding':'gzip'})
       self._updateHeaders=updateHeaders
       self._sendRequest=sendRequest or self.__sendRequest_rpcHttpPost
@@ -114,7 +114,7 @@ class rpcSender(object):
          headers['Content-Encoding']='gzip'
       return data
 
-   def __uncompressRequest_gzip(self, data, headers):
+   def __uncompressResponse_gzip(self, data, headers):
       if headers.get('content-encoding', None)=='gzip':
          try:
             data=self._server._uncompressGZIP(data)
